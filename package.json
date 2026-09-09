@@ -1,0 +1,42 @@
+{
+  "name": "agent-eval-runner",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Run reproducible local coding-agent evaluations and preserve their evidence.",
+  "type": "module",
+  "bin": {
+    "agent-eval": "./dist/cli.js"
+  },
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm schemas:check && pnpm test",
+    "example": "tsx scripts/run-example.ts",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint .",
+    "schemas:check": "tsx scripts/generate-schemas.ts --check",
+    "schemas:write": "tsx scripts/generate-schemas.ts --write",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@11.23.0",
+  "dependencies": {
+    "@sinclair/typebox": "^0.34.41"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.34.0",
+    "@types/node": "^24.3.0",
+    "eslint": "^9.34.0",
+    "prettier": "^3.6.2",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2",
+    "typescript-eslint": "^8.41.0",
+    "vitest": "^3.2.4"
+  }
+}
