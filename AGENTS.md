@@ -4,7 +4,7 @@
 
 Agent Eval Runner measures coding-agent attempts under reproducible conditions. Its output is evidence: inputs, environment identity, commands, patches, checks, resource use, and artifacts.
 
-Read `README.md` and `ROADMAP.md` before changing scope. Milestones 0 and 1 are implemented. Do not describe roadmap items from milestone 2 onward as complete unless their checkbox and implementation agree.
+Read `README.md` and `ROADMAP.md` before changing scope. Milestones 0, 1, and 2 are implemented. Do not describe roadmap items from milestone 3 onward as complete unless their checkbox and implementation agree.
 
 ## Product rules
 
@@ -18,7 +18,7 @@ Read `README.md` and `ROADMAP.md` before changing scope. Milestones 0 and 1 are 
 
 ## Runtime and isolation
 
-Use Node.js 22 or newer, pnpm, and strict TypeScript. TypeBox schemas define runtime validation, TypeScript types, and generated JSON Schemas. Do not hand-edit files under `schemas`; change `src/spec.ts`, `src/result.ts`, or `src/events.ts`, then run `pnpm schemas:write`.
+Use Node.js 22 or newer, pnpm, and strict TypeScript. TypeBox schemas define runtime validation, TypeScript types, and generated JSON Schemas. Do not hand-edit files under `schemas`; change the schema sources (`src/spec.ts`, `src/result.ts`, `src/events.ts`, `src/usage.ts`, `src/batch-spec.ts`, `src/comparison-spec.ts`), then run `pnpm schemas:write`. Result v1 is archived and must not be regenerated from the v2 source.
 
 The local execution boundary is a detached Git worktree under the operating system's temporary directory. It does not restrict network access, host filesystem access, source repository metadata, or local Git configuration. Do not run paid models, untrusted repositories, or untrusted commands without explicit user authorization and stronger isolation.
 
@@ -27,6 +27,16 @@ The local execution boundary is a detached Git worktree under the operating syst
 The runner owns orchestration, evidence collection, budgets, and scoring. Agent adapters translate a common run request into provider-specific execution and return normalized events. Do not leak provider-specific fields into the core result model.
 
 Use discriminated unions for run events. Do not use `any`, unsafe assertions, or casting wrappers to bypass the type system.
+
+## Batches and comparisons
+
+- Keep batch scheduling sequential, in configuration/repetition order, with a fresh worktree for each attempt. Do not add retries or concurrency implicitly.
+- Exclusively create the output directory. Finalize each result before starting another attempt; persist a snapshot before deleting a checkout. Preserve the last index on cancellation or persistence failure.
+- Ordinary failure/timeouts do not cancel the schedule. External cancellation stops new attempts and records them as `not_started`.
+- Score version 2 counts every declared check, including skipped checks. Record skip reasons and preserve the original adapter outcome when later phases fail.
+- Comparisons read saved results only. Reject incompatible task/scoring identities, altered bytes, escaping result paths, and attempts to overwrite evidence.
+- Keep known-zero fake model usage distinct from unknown usage. Unknown usage propagates to totals; no provider token/cost budget exists yet.
+- Shared-task digests exclude adapter configuration; preserve separate configured-task and adapter digests. Do not claim matching hashes pin toolchains or authenticate evidence.
 
 ## Verification
 
@@ -37,9 +47,10 @@ pnpm format
 pnpm check
 pnpm build
 pnpm example
+pnpm example:batch
 ```
 
-`pnpm check` verifies formatting, linting, types, generated schemas, and focused tests. Tests cover command budgets, wall-clock budgets, descendant process termination, event ordering, artifact capture, patch generation, deterministic scoring, result preservation, and basic credential redaction. Integration tests create local temporary Git repositories and credentials for each test.
+`pnpm check` verifies formatting, linting, types, generated schemas, and focused tests. Tests cover budgets, descendant process termination, event ordering, artifact/patch capture, scoring, result preservation, basic credential redaction, repetitions, cancellation, persistence failure, usage aggregation, and report compatibility/regeneration. Integration tests create trusted local temporary Git repositories and credentials. `pnpm example:batch` needs the built CLI and verifies intentional failures, all saved artifacts, and deterministic regeneration. CI runs both examples on Linux and Windows without uploading results.
 
 Add focused tests for budget enforcement, adapter normalization, event ordering, redaction, process termination, artifact capture, and scoring changes. Do not add placeholder scripts that always pass.
 

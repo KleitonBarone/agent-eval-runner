@@ -1,6 +1,6 @@
 {
   "name": "agent-eval-runner",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Run reproducible local coding-agent evaluations and preserve their evidence.",
   "type": "module",
@@ -14,6 +14,7 @@
     "build": "tsc -p tsconfig.build.json",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm schemas:check && pnpm test",
     "example": "tsx scripts/run-example.ts",
+    "example:batch": "tsx scripts/run-batch-example.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint .",

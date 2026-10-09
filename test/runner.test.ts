@@ -51,6 +51,42 @@ function taskFor(
 }
 
 describe("evaluation runner", () => {
+  it("preserves files written before an adapter exception", async () => {
+    const repository = await createTestRepository();
+    const base = taskFor(repository);
+    const result = await runEvaluation({
+      ...base,
+      adapter: {
+        kind: "fake",
+        actions: [
+          { kind: "writeFile", path: "answer.txt", content: "answer\n" },
+          { kind: "writeFile", path: "../escape.txt", content: "invalid" },
+        ],
+      },
+    });
+
+    expect(result.attempt.outcome).toBe("runner_error");
+    expect(result.patch.content).toContain("answer.txt");
+    expect(result.artifacts).toMatchObject([{ path: "answer.txt" }]);
+    expect(result.checks).toMatchObject([{ id: "answer", status: "passed" }]);
+    expect(result.errors.join(" ")).toContain("escapes");
+  });
+
+  it("includes every declared check when cancellation prevents execution", async () => {
+    const repository = await createTestRepository();
+    const controller = new AbortController();
+    controller.abort();
+    const result = await runEvaluation(taskFor(repository), {
+      signal: controller.signal,
+    });
+
+    expect(result.status).toBe("interrupted");
+    expect(result.checks).toMatchObject([
+      { id: "answer", status: "skipped", reason: "cancelled", command: null },
+    ]);
+    expect(result.score).toMatchObject({ passed: 0, total: 1, ratio: 0 });
+  });
+
   it("captures commands, artifacts, patch, checks, scoring, and ordered events", async () => {
     const repository = await createTestRepository();
     const result = await runEvaluation(taskFor(repository));
@@ -71,12 +107,32 @@ describe("evaluation runner", () => {
       ).toString(),
     ).toBe("answer\n");
     expect(result.checks).toMatchObject([{ id: "answer", status: "passed" }]);
-    expect(result.score).toEqual({ passed: 1, total: 1, ratio: 1 });
+    expect(result.score).toEqual({
+      version: "2",
+      passed: 1,
+      failed: 0,
+      skipped: 0,
+      total: 1,
+      ratio: 1,
+    });
     expect(result.events.map(({ sequence }) => sequence)).toEqual(
       result.events.map((_, index) => index),
     );
     expect(result.events.at(0)?.type).toBe("run.started");
     expect(result.events.at(-1)?.type).toBe("run.finished");
+    const types = result.events.map(({ type }) => type);
+    expect(types.indexOf("command.started")).toBeLessThan(
+      types.indexOf("command.finished"),
+    );
+    expect(types.indexOf("agent.finished")).toBeLessThan(
+      types.indexOf("patch.captured"),
+    );
+    expect(types.indexOf("artifact.captured")).toBeLessThan(
+      types.indexOf("check.started"),
+    );
+    expect(types.indexOf("check.finished")).toBeLessThan(
+      types.indexOf("score.computed"),
+    );
   });
 
   it("enforces the fake agent command budget outside the adapter", async () => {
@@ -193,5 +249,55 @@ describe("evaluation runner", () => {
     expect(result.patch.redacted).toBe(true);
     expect(result.artifacts[0]?.redacted).toBe(true);
     expect(JSON.stringify(result)).not.toContain("secret-value");
+  });
+
+  it("keeps the original outcome and later checks when artifact and check setup fail", async () => {
+    const repository = await createTestRepository();
+    const base = taskFor(repository);
+    const result = await runEvaluation({
+      ...base,
+      adapter: {
+        kind: "fake",
+        actions: [
+          {
+            kind: "runCommand",
+            command: process.execPath,
+            args: ["-e", "process.exit(7)"],
+          },
+        ],
+      },
+      artifacts: [{ path: "missing.txt", mediaType: "text/plain" }],
+      checks: [
+        {
+          ...base.checks[0],
+          id: "invalid-cwd",
+          kind: "test",
+          command: process.execPath,
+          args: [],
+          timeoutMs: 1000,
+          cwd: "../escape",
+        },
+        {
+          id: "later",
+          kind: "lint",
+          command: process.execPath,
+          args: ["-e", "process.exit(0)"],
+          timeoutMs: 1000,
+        },
+      ],
+    });
+    expect(result.attempt.outcome).toBe("agent_failed");
+    expect(result.patch.captured).toBe(true);
+    expect(result.errors).toHaveLength(2);
+    expect(result.checks).toMatchObject([
+      { status: "skipped", reason: "check_error" },
+      { status: "passed" },
+    ]);
+    expect(result.score).toMatchObject({
+      passed: 1,
+      skipped: 1,
+      total: 2,
+      ratio: 0.5,
+    });
   });
 });

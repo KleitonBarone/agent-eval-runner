@@ -140,6 +140,7 @@ export async function runProcess(
     terminate("cancelled");
   };
   request.signal?.addEventListener("abort", abort, { once: true });
+  if (request.signal?.aborted === true) abort();
 
   const closed = await new Promise<{
     code: number | null;

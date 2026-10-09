@@ -2,12 +2,17 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { format } from "prettier";
 
+import { BatchIndexSchema, BatchSpecSchema } from "../src/batch-spec.js";
+import { ComparisonSpecSchema } from "../src/comparison-spec.js";
 import { ResultSpecSchema } from "../src/result.js";
 import { TaskSpecSchema } from "../src/spec.js";
 
 const schemas = [
   ["schemas/task-v1.schema.json", TaskSpecSchema],
-  ["schemas/result-v1.schema.json", ResultSpecSchema],
+  ["schemas/result-v2.schema.json", ResultSpecSchema],
+  ["schemas/batch-v1.schema.json", BatchSpecSchema],
+  ["schemas/batch-index-v1.schema.json", BatchIndexSchema],
+  ["schemas/comparison-v1.schema.json", ComparisonSpecSchema],
 ] as const;
 const mode = process.argv[2];
 if (mode !== "--check" && mode !== "--write") {

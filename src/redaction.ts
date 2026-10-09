@@ -1,3 +1,5 @@
+import type { TaskSpec } from "./spec.js";
+
 const ASSIGNMENT_PATTERN =
   /\b((?:api[_-]?key|token|secret|password|passwd|credential)s?)\s*=\s*([^\s"']+)/giu;
 const BEARER_PATTERN = /(\bAuthorization\s*:\s*Bearer\s+)([^\s]+)/giu;
@@ -43,4 +45,3 @@ export function collectTaskSecrets(task: TaskSpec): string[] {
   for (const check of task.checks) collect(check.env);
   return values;
 }
-import type { TaskSpec } from "./spec.js";

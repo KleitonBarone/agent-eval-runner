@@ -1,6 +1,4 @@
-import { createHash } from "node:crypto";
-import { mkdir, rename, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { randomUUID } from "node:crypto";
 
 import { captureArtifact, type CapturedArtifact } from "./artifacts.js";
 import { EventRecorder } from "./events.js";
@@ -11,9 +9,20 @@ import {
   removeCheckout,
   type PreparedCheckout,
 } from "./git.js";
+import {
+  canonicalJson,
+  comparisonDigest,
+  DEFAULT_MAX_ARTIFACT_BYTES,
+  sha256,
+} from "./identity.js";
 import { resolveInside } from "./paths.js";
+import { writeJsonAtomic } from "./persistence.js";
 import { runProcess, type ProcessResult } from "./process.js";
-import { collectTaskSecrets, createRedactor } from "./redaction.js";
+import {
+  collectTaskSecrets,
+  createRedactor,
+  type Redactor,
+} from "./redaction.js";
 import {
   assertResultSpec,
   type CheckResult,
@@ -21,35 +30,29 @@ import {
   type ResultSpec,
 } from "./result.js";
 import { scoreChecks } from "./scoring.js";
-import type { TaskSpec } from "./spec.js";
-
-const RUNNER_VERSION = "0.1.0";
-const DEFAULT_MAX_ARTIFACT_BYTES = 1024 * 1024;
+import { parseTaskSpec, type TaskSpec } from "./spec.js";
+import { fakeUsage } from "./usage.js";
 
 export interface RunEvaluationOptions {
   readonly outputPath?: string;
   readonly keepWorktree?: boolean;
   readonly signal?: AbortSignal;
-}
-
-function sha256(value: string | Buffer): string {
-  return createHash("sha256").update(value).digest("hex");
+  readonly attemptId?: string;
+  readonly configurationId?: string;
+  readonly repetition?: number;
 }
 
 function sanitizeEnvironment(
   environment: Readonly<Record<string, string>> | undefined,
-  redact: (value: string) => string,
-): Record<string, string> | undefined {
+  redact: Redactor,
+) {
   if (environment === undefined) return undefined;
   return Object.fromEntries(
     Object.entries(environment).map(([key, value]) => [key, redact(value)]),
   );
 }
 
-function sanitizeTask(
-  task: TaskSpec,
-  redact: (value: string) => string,
-): TaskSpec {
+function sanitizeTask(task: TaskSpec, redact: Redactor): TaskSpec {
   const actions: TaskSpec["adapter"]["actions"] = task.adapter.actions.map(
     (action) => {
       if (action.kind === "writeFile") {
@@ -105,151 +108,146 @@ function commandEvidence(
   cwd: string,
   result: ProcessResult,
 ): CommandResult {
-  return {
-    id,
-    command: result.command,
-    args: [...result.args],
-    cwd,
-    exitCode: result.exitCode,
-    signal: result.signal,
-    stdout: result.stdout,
-    stderr: result.stderr,
-    stdoutTruncated: result.stdoutTruncated,
-    stderrTruncated: result.stderrTruncated,
-    durationMs: result.durationMs,
-    termination: result.termination,
-    error: result.error,
-  };
+  return { ...result, id, args: [...result.args], cwd };
 }
 
-async function persistResult(path: string, result: ResultSpec): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  const temporaryPath = `${path}.tmp-${String(process.pid)}`;
-  await writeFile(
-    temporaryPath,
-    `${JSON.stringify(result, null, 2)}\n`,
-    "utf8",
-  );
-  await rename(temporaryPath, path);
-}
-
+// Each phase can fail without preventing later evidence collection or cleanup.
 export async function runEvaluation(
-  task: TaskSpec,
+  taskInput: TaskSpec,
   options: RunEvaluationOptions = {},
 ): Promise<ResultSpec> {
+  const task = parseTaskSpec(taskInput);
   const recorder = new EventRecorder();
   recorder.record({ type: "run.started" });
   const redact = createRedactor(collectTaskSecrets(task));
-  const taskJson = JSON.stringify(task);
-  const sanitizedTask = sanitizeTask(task, redact);
   const errors: string[] = [];
+  const addError = (phase: string, error: unknown): void => {
+    errors.push(
+      `${phase}: ${redact(error instanceof Error ? error.message : String(error))}`,
+    );
+  };
   const commands: CommandResult[] = [];
   const checks: CheckResult[] = [];
   const artifacts: CapturedArtifact[] = [];
   let checkout: PreparedCheckout | undefined;
-  let resolvedRevision: string | null = null;
-  let patchContent = "";
   let attemptOutcome: ResultSpec["attempt"]["outcome"] = "runner_error";
   let attemptDurationMs = 0;
   let commandCount = 0;
-  let status: ResultSpec["status"] = "failed";
-  let retainedWorkspacePath: string | null = null;
+  let patchContent = "";
+  let patchCaptured = false;
 
-  try {
-    checkout = await prepareCheckout(
-      task.repository.path,
-      task.repository.revision,
-    );
+  if (options.signal?.aborted === true) {
+    attemptOutcome = "cancelled";
+  } else {
+    try {
+      checkout = await prepareCheckout(
+        task.repository.path,
+        task.repository.revision,
+      );
+      recorder.record({
+        type: "checkout.prepared",
+        revision: checkout.revision,
+      });
+    } catch (error) {
+      addError("checkout", error);
+    }
+  }
+
+  if (checkout !== undefined) {
     const workspace = checkout.path;
-    resolvedRevision = checkout.revision;
-    recorder.record({ type: "checkout.prepared", revision: checkout.revision });
-
-    const attemptStartedAt = performance.now();
-    const deadline = attemptStartedAt + task.budgets.wallClockMs;
+    const startedAt = performance.now();
+    const deadline = startedAt + task.budgets.wallClockMs;
     let skippedReason:
       "command_budget_exceeded" | "wall_clock_exceeded" | "cancelled" =
       "command_budget_exceeded";
     recorder.record({ type: "agent.started", adapter: "fake" });
-
-    const execute = async (
-      action: Extract<
-        TaskSpec["adapter"]["actions"][number],
-        { kind: "runCommand" }
-      >,
-    ): Promise<ProcessResult | null> => {
-      if (options.signal?.aborted === true) {
-        skippedReason = "cancelled";
-        return null;
-      }
-      if (commandCount >= task.budgets.maxCommands) {
-        skippedReason = "command_budget_exceeded";
-        recorder.record({ type: "budget.exceeded", budget: "commands" });
-        return null;
-      }
-      const remainingMs = Math.floor(deadline - performance.now());
-      if (remainingMs <= 0) {
-        skippedReason = "wall_clock_exceeded";
-        recorder.record({ type: "budget.exceeded", budget: "wall_clock" });
-        return null;
-      }
-
-      commandCount += 1;
-      const id = `agent-${String(commandCount)}`;
-      const relativeCwd = action.cwd ?? ".";
-      const cwd = resolveInside(workspace, relativeCwd);
-      recorder.record({
-        type: "command.started",
-        commandId: id,
-        command: redact(action.command),
-        args: action.args.map(redact),
-      });
-      const result = await runProcess(
-        {
-          command: action.command,
-          args: action.args,
-          cwd,
-          ...(action.env === undefined ? {} : { env: action.env }),
-          timeoutMs: remainingMs,
-          timeoutTermination: "wall_clock",
-          maxOutputBytes: task.budgets.maxOutputBytes,
-          ...(options.signal === undefined ? {} : { signal: options.signal }),
+    try {
+      attemptOutcome = await runFakeAgent({
+        workspace,
+        actions: task.adapter.actions,
+        deadline,
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+        outcomeAfterSkippedCommand: () => skippedReason,
+        execute: async (action) => {
+          if (options.signal?.aborted === true) {
+            skippedReason = "cancelled";
+            return null;
+          }
+          const remainingMs = Math.floor(deadline - performance.now());
+          if (remainingMs <= 0) {
+            skippedReason = "wall_clock_exceeded";
+            return null;
+          }
+          if (commandCount >= task.budgets.maxCommands) {
+            skippedReason = "command_budget_exceeded";
+            return null;
+          }
+          const relativeCwd = action.cwd ?? ".";
+          const cwd = resolveInside(workspace, relativeCwd);
+          commandCount += 1;
+          const id = `agent-${String(commandCount)}`;
+          recorder.record({
+            type: "command.started",
+            commandId: id,
+            command: redact(action.command),
+            args: action.args.map(redact),
+          });
+          const result = await runProcess(
+            {
+              command: action.command,
+              args: action.args,
+              cwd,
+              ...(action.env === undefined ? {} : { env: action.env }),
+              timeoutMs: remainingMs,
+              timeoutTermination: "wall_clock",
+              maxOutputBytes: task.budgets.maxOutputBytes,
+              ...(options.signal === undefined
+                ? {}
+                : { signal: options.signal }),
+            },
+            redact,
+          );
+          commands.push(commandEvidence(id, redact(relativeCwd), result));
+          recorder.record({
+            type: "command.finished",
+            commandId: id,
+            exitCode: result.exitCode,
+            termination: result.termination,
+          });
+          return result;
         },
-        redact,
-      );
-      commands.push(commandEvidence(id, relativeCwd, result));
-      recorder.record({
-        type: "command.finished",
-        commandId: id,
-        exitCode: result.exitCode,
-        termination: result.termination,
       });
-      if (result.termination === "wall_clock") {
-        skippedReason = "wall_clock_exceeded";
-        recorder.record({ type: "budget.exceeded", budget: "wall_clock" });
-      } else if (result.termination === "cancelled") {
-        skippedReason = "cancelled";
+    } catch (error) {
+      attemptOutcome = "runner_error";
+      addError("agent", error);
+    } finally {
+      attemptDurationMs =
+        Math.round((performance.now() - startedAt) * 1000) / 1000;
+      if (
+        attemptOutcome === "wall_clock_exceeded" ||
+        attemptOutcome === "command_budget_exceeded"
+      ) {
+        recorder.record({
+          type: "budget.exceeded",
+          budget:
+            attemptOutcome === "wall_clock_exceeded"
+              ? "wall_clock"
+              : "commands",
+        });
       }
-      return result;
-    };
+      recorder.record({ type: "agent.finished", outcome: attemptOutcome });
+    }
 
-    attemptOutcome = await runFakeAgent({
-      workspace,
-      actions: task.adapter.actions,
-      execute,
-      outcomeAfterSkippedCommand: () => skippedReason,
-      deadline,
-      ...(options.signal === undefined ? {} : { signal: options.signal }),
-    });
-    attemptDurationMs =
-      Math.round((performance.now() - attemptStartedAt) * 1_000) / 1_000;
-    recorder.record({ type: "agent.finished", outcome: attemptOutcome });
-
-    patchContent = await capturePatch(workspace);
-    recorder.record({
-      type: "patch.captured",
-      bytes: Buffer.byteLength(patchContent),
-    });
-
+    try {
+      patchContent = await capturePatch(workspace);
+      patchCaptured = true;
+      recorder.record({
+        type: "patch.captured",
+        bytes: Buffer.byteLength(patchContent),
+      });
+    } catch (error) {
+      addError("patch", error);
+    }
     for (const descriptor of task.artifacts) {
       try {
         const artifact = await captureArtifact(
@@ -258,149 +256,181 @@ export async function runEvaluation(
           task.budgets.maxArtifactBytes ?? DEFAULT_MAX_ARTIFACT_BYTES,
           redact,
         );
-        const sanitizedArtifact = { ...artifact, path: redact(artifact.path) };
-        artifacts.push(sanitizedArtifact);
+        artifacts.push({ ...artifact, path: redact(artifact.path) });
         recorder.record({
           type: "artifact.captured",
-          path: sanitizedArtifact.path,
-          bytes: sanitizedArtifact.bytes,
+          path: redact(artifact.path),
+          bytes: artifact.bytes,
         });
       } catch (error) {
-        errors.push(
-          redact(error instanceof Error ? error.message : String(error)),
-        );
+        addError("artifact", error);
       }
     }
+  }
 
-    if (
-      attemptOutcome !== "wall_clock_exceeded" &&
-      attemptOutcome !== "cancelled"
-    ) {
-      for (const check of task.checks) {
-        recorder.record({ type: "check.started", checkId: check.id });
-        const relativeCwd = check.cwd ?? ".";
-        const checkProcess = await runProcess(
-          {
-            command: check.command,
-            args: check.args,
-            cwd: resolveInside(workspace, relativeCwd),
-            ...(check.env === undefined ? {} : { env: check.env }),
-            timeoutMs: check.timeoutMs,
-            timeoutTermination: "check_timeout",
-            maxOutputBytes: task.budgets.maxOutputBytes,
-            ...(options.signal === undefined ? {} : { signal: options.signal }),
-          },
-          redact,
-        );
-        const checkStatus = checkProcess.exitCode === 0 ? "passed" : "failed";
-        checks.push({
-          id: check.id,
-          kind: check.kind,
-          status: checkStatus,
-          command: commandEvidence(
-            `check-${check.id}`,
-            relativeCwd,
-            checkProcess,
-          ),
-        });
-        recorder.record({
-          type: "check.finished",
-          checkId: check.id,
-          status: checkStatus,
-        });
-      }
+  for (const check of task.checks) {
+    const skipReason =
+      options.signal?.aborted === true || attemptOutcome === "cancelled"
+        ? "cancelled"
+        : checkout === undefined
+          ? "checkout_failed"
+          : attemptOutcome === "wall_clock_exceeded"
+            ? "wall_clock_exceeded"
+            : null;
+    if (skipReason !== null) {
+      checks.push({
+        id: check.id,
+        kind: check.kind,
+        status: "skipped",
+        reason: skipReason,
+        command: null,
+      });
+      recorder.record({
+        type: "check.skipped",
+        checkId: check.id,
+        reason: skipReason,
+      });
+      continue;
     }
-
-    const score = scoreChecks(checks);
-    recorder.record({
-      type: "score.computed",
-      passed: score.passed,
-      total: score.total,
-    });
-    status =
-      options.signal?.aborted === true ||
-      attemptOutcome === "wall_clock_exceeded" ||
-      attemptOutcome === "cancelled"
-        ? "interrupted"
-        : attemptOutcome === "completed" &&
-            checks.every(
-              ({ status: checkStatus }) => checkStatus === "passed",
-            ) &&
-            errors.length === 0
-          ? "succeeded"
+    // The non-null checkout follows from skipReason; keep the runtime boundary explicit.
+    if (checkout === undefined)
+      throw new Error("Missing checkout for a runnable check");
+    try {
+      const relativeCwd = check.cwd ?? ".";
+      const cwd = resolveInside(checkout.path, relativeCwd);
+      recorder.record({ type: "check.started", checkId: check.id });
+      const result = await runProcess(
+        {
+          command: check.command,
+          args: check.args,
+          cwd,
+          ...(check.env === undefined ? {} : { env: check.env }),
+          timeoutMs: check.timeoutMs,
+          timeoutTermination: "check_timeout",
+          maxOutputBytes: task.budgets.maxOutputBytes,
+          ...(options.signal === undefined ? {} : { signal: options.signal }),
+        },
+        redact,
+      );
+      const status =
+        result.exitCode === 0 &&
+        result.termination === null &&
+        result.error === null
+          ? "passed"
           : "failed";
-  } catch (error) {
-    errors.push(redact(error instanceof Error ? error.message : String(error)));
-    attemptOutcome =
-      options.signal?.aborted === true ? "cancelled" : "runner_error";
-    status = options.signal?.aborted === true ? "interrupted" : "failed";
-  }
-
-  if (checkout !== undefined) {
-    if (options.keepWorktree === true) {
-      retainedWorkspacePath = checkout.path;
-    } else {
-      try {
-        await removeCheckout(checkout);
-      } catch (error) {
-        retainedWorkspacePath = checkout.path;
-        errors.push(
-          redact(error instanceof Error ? error.message : String(error)),
-        );
-        status = "failed";
-      }
+      checks.push({
+        id: check.id,
+        kind: check.kind,
+        status,
+        command: commandEvidence(
+          `check-${check.id}`,
+          redact(relativeCwd),
+          result,
+        ),
+      });
+      recorder.record({ type: "check.finished", checkId: check.id, status });
+    } catch (error) {
+      addError(`check ${check.id}`, error);
+      checks.push({
+        id: check.id,
+        kind: check.kind,
+        status: "skipped",
+        reason: "check_error",
+        command: null,
+      });
+      recorder.record({
+        type: "check.skipped",
+        checkId: check.id,
+        reason: "check_error",
+      });
     }
   }
 
-  recorder.record({ type: "run.finished", status });
   const score = scoreChecks(checks);
-  const redactedPatchContent = redact(patchContent);
-  const patchBytes = Buffer.byteLength(redactedPatchContent);
+  recorder.record({
+    type: "score.computed",
+    passed: score.passed,
+    total: score.total,
+  });
+  const interrupted =
+    options.signal?.aborted === true ||
+    attemptOutcome === "wall_clock_exceeded" ||
+    attemptOutcome === "cancelled";
+  const initialStatus = interrupted
+    ? "interrupted"
+    : attemptOutcome === "completed" &&
+        score.passed === score.total &&
+        errors.length === 0
+      ? "succeeded"
+      : "failed";
+  const redactedPatch = redact(patchContent);
   const result: ResultSpec = {
-    $schema: "https://agent-eval-runner.dev/schemas/result-v1.schema.json",
-    schemaVersion: "1",
+    $schema: "https://agent-eval-runner.dev/schemas/result-v2.schema.json",
+    schemaVersion: "2",
     runner: {
       name: "agent-eval-runner",
-      version: RUNNER_VERSION,
+      version: "0.2.0",
       node: process.version,
       platform: process.platform,
       arch: process.arch,
     },
-    task: sanitizedTask,
-    taskSha256: sha256(taskJson),
-    status,
+    task: sanitizeTask(task, redact),
+    taskSha256: sha256(canonicalJson(task)),
+    comparisonSha256: comparisonDigest(task),
+    adapterSha256: sha256(canonicalJson(task.adapter)),
+    usage: fakeUsage(),
+    status: initialStatus,
     source: {
       repositoryPath: redact(task.repository.path),
       requestedRevision: task.repository.revision,
-      resolvedRevision,
+      resolvedRevision: checkout?.revision ?? null,
     },
     attempt: {
+      id: options.attemptId ?? randomUUID(),
+      configurationId: options.configurationId ?? "fake",
+      repetition: options.repetition ?? 1,
       adapter: "fake",
       outcome: attemptOutcome,
       durationMs: attemptDurationMs,
       commandCount,
     },
     commands,
-    patch: {
-      bytes: patchBytes,
-      originalBytes: Buffer.byteLength(patchContent),
-      sha256: sha256(redactedPatchContent),
-      originalSha256: sha256(patchContent),
-      redacted: redactedPatchContent !== patchContent,
-      content: redactedPatchContent,
-    },
-    artifacts,
     checks,
+    artifacts,
+    errors,
     score,
     events: recorder.events,
-    errors,
+    patch: {
+      captured: patchCaptured,
+      bytes: Buffer.byteLength(redactedPatch),
+      originalBytes: Buffer.byteLength(patchContent),
+      sha256: sha256(redactedPatch),
+      originalSha256: sha256(patchContent),
+      redacted: redactedPatch !== patchContent,
+      content: redactedPatch,
+    },
     workspace: {
-      retained: retainedWorkspacePath !== null,
-      path: retainedWorkspacePath,
+      retained: checkout !== undefined,
+      path: checkout === undefined ? null : redact(checkout.path),
     },
   };
   assertResultSpec(result);
+  // Preserve evidence before deleting the only remaining checkout. If writing fails,
+  // leave that checkout available for recovery and propagate the persistence error.
   if (options.outputPath !== undefined)
-    await persistResult(options.outputPath, result);
+    await writeJsonAtomic(options.outputPath, result);
+  if (checkout !== undefined && options.keepWorktree !== true) {
+    try {
+      await removeCheckout(checkout);
+      result.workspace = { retained: false, path: null };
+    } catch (error) {
+      addError("cleanup", error);
+      if (!interrupted) result.status = "failed";
+    }
+  }
+  recorder.record({ type: "run.finished", status: result.status });
+  assertResultSpec(result);
+  if (options.outputPath !== undefined)
+    await writeJsonAtomic(options.outputPath, result);
   return result;
 }

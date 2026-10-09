@@ -24,13 +24,17 @@ Completed in version 0.1.0. `pnpm example` runs the acceptance path without mode
 
 ## 2. Useful comparisons
 
-- [ ] Run multiple attempts against the same task
-- [ ] Normalize token and cost reporting
-- [ ] Compare check results, duration, cost, and patch size
-- [ ] Generate a human-readable comparison report
+- [x] Run multiple attempts against the same task
+- [x] Normalize token and cost reporting
+- [x] Compare check results, duration, cost, and patch size
+- [x] Generate a human-readable comparison report
 - [x] Preserve failed and interrupted attempts
 
-Failed and interrupted result preservation shipped early because budget enforcement needs inspectable evidence.
+Completed in version 0.2.0. Batch v1 runs configurations and repetitions sequentially in fresh worktrees, with an atomic index and separate results. Result v2 records attempt identities, shared/configured input digests, normalized usage, and explicit skipped checks. Score v2 counts all declared checks; archived v1 results are not mixed into comparisons.
+
+`pnpm build && pnpm example:batch` verifies the built batch/compare CLI with two successful repetitions, a failed check, and a timeout. All four results and artifacts survive, and JSON/Markdown reports regenerate byte-identically from saved evidence. Focused tests also verify cancellation, directory collisions, persistence failure, task compatibility, path escapes, and unknown usage propagation. Fake model usage is known zero; real usage collection and token/cost enforcement remain future work.
+
+Failed and interrupted result preservation shipped in milestone 1. Version 0.2.0 also captures evidence after adapter exceptions, represents every declared check, and saves a snapshot before worktree deletion.
 
 ## 3. Real adapters and stronger isolation
 
@@ -40,7 +44,7 @@ Failed and interrupted result preservation shipped early because budget enforcem
 - [ ] Add resumable execution and cancellation
 - [ ] Publish a small, versioned evaluation suite
 
-Version 0.1.0 has basic text redaction and signal-driven cancellation. Neither is a complete security boundary or resumable execution, so the corresponding items remain open.
+Basic text redaction and signal-driven cancellation shipped in version 0.1.0; version 0.2.0 adds batch cancellation and explicit unstarted entries. Neither release provides a complete secret/security boundary, hard process containment, or resumable execution, so those items remain open. No real adapter or paid-model execution was added.
 
 ## Later, if justified
 

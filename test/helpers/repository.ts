@@ -53,6 +53,26 @@ export async function removeTestWorktree(
   ]);
 }
 
+export async function retainedTestWorktrees(
+  repositoryPath: string,
+): Promise<string[]> {
+  const { stdout } = await execFileAsync("git", [
+    "-C",
+    repositoryPath,
+    "worktree",
+    "list",
+    "--porcelain",
+  ]);
+  return stdout
+    .split("\n")
+    .filter((line) => line.startsWith("worktree "))
+    .map((line) => line.slice("worktree ".length).trim())
+    .filter(
+      (path) =>
+        resolve(path).toLowerCase() !== resolve(repositoryPath).toLowerCase(),
+    );
+}
+
 export async function cleanupTestRepositories(): Promise<void> {
   const temporaryRoot = resolve(tmpdir());
   for (const repository of repositories) {

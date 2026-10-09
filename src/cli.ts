@@ -1,76 +1,82 @@
 #!/usr/bin/env node
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { join } from "node:path";
 
+import { runBatch } from "./batch.js";
+import { parseBatchSpec } from "./batch-spec.js";
+import { CLI_USAGE, parseArguments } from "./cli-arguments.js";
+import { readComparison, writeComparison } from "./comparison.js";
 import { runEvaluation } from "./runner.js";
 import { parseTaskSpec } from "./spec.js";
 
-interface CliArguments {
-  readonly taskPath: string;
-  readonly outputPath: string;
-  readonly keepWorktree: boolean;
-}
-
-function usage(): string {
-  return "Usage: agent-eval run --task <task.json> --output <result.json> [--keep-worktree]";
-}
-
-function parseArguments(args: readonly string[]): CliArguments {
-  if (args[0] !== "run") throw new Error(usage());
-  let taskPath: string | undefined;
-  let outputPath: string | undefined;
-  let keepWorktree = false;
-  for (let index = 1; index < args.length; index += 1) {
-    const argument = args[index];
-    if (argument === "--keep-worktree") {
-      keepWorktree = true;
-    } else if (argument === "--task") {
-      taskPath = args[index + 1];
-      index += 1;
-    } else if (argument === "--output") {
-      outputPath = args[index + 1];
-      index += 1;
-    } else {
-      throw new Error(`Unknown argument: ${argument ?? ""}\n${usage()}`);
-    }
-  }
-  if (taskPath === undefined || outputPath === undefined)
-    throw new Error(usage());
-  return {
-    taskPath: resolve(taskPath),
-    outputPath: resolve(outputPath),
-    keepWorktree,
-  };
-}
-
 async function main(): Promise<void> {
-  const arguments_ = parseArguments(process.argv.slice(2));
-  const rawTask: unknown = JSON.parse(
-    await readFile(arguments_.taskPath, "utf8"),
-  );
-  const task = parseTaskSpec(rawTask);
+  const args = process.argv.slice(2);
+  if (args.length === 1 && args[0] === "--help") {
+    process.stdout.write(`${CLI_USAGE}\n`);
+    return;
+  }
+  const arguments_ = parseArguments(args);
+  if (arguments_.operation === "compare") {
+    const report = await writeComparison(
+      arguments_.inputDirectory,
+      arguments_.outputPath,
+      arguments_.markdownPath,
+    );
+    process.stdout.write(
+      `${JSON.stringify({ schemaVersion: "1", finished: report.summary.finished, output: arguments_.outputPath, markdown: arguments_.markdownPath })}\n`,
+    );
+    return;
+  }
   const controller = new AbortController();
   const cancel = (): void => {
     controller.abort();
   };
   process.once("SIGINT", cancel);
   process.once("SIGTERM", cancel);
-  const result = await runEvaluation(task, {
-    outputPath: arguments_.outputPath,
-    keepWorktree: arguments_.keepWorktree,
-    signal: controller.signal,
-  });
-  process.removeListener("SIGINT", cancel);
-  process.removeListener("SIGTERM", cancel);
-  process.stdout.write(
-    `${JSON.stringify({ status: result.status, output: arguments_.outputPath })}\n`,
-  );
-  process.exitCode =
-    result.status === "succeeded"
-      ? 0
-      : result.status === "interrupted"
-        ? 130
-        : 1;
+  try {
+    if (arguments_.operation === "run") {
+      const input: unknown = JSON.parse(
+        await readFile(arguments_.taskPath, "utf8"),
+      );
+      const result = await runEvaluation(parseTaskSpec(input), {
+        outputPath: arguments_.outputPath,
+        keepWorktree: arguments_.keepWorktree,
+        signal: controller.signal,
+      });
+      process.stdout.write(
+        `${JSON.stringify({ schemaVersion: "1", status: result.status, output: arguments_.outputPath })}\n`,
+      );
+      process.exitCode =
+        result.status === "succeeded"
+          ? 0
+          : result.status === "interrupted"
+            ? 130
+            : 1;
+    } else {
+      const input: unknown = JSON.parse(
+        await readFile(arguments_.batchPath, "utf8"),
+      );
+      const index = await runBatch(parseBatchSpec(input), {
+        outputDirectory: arguments_.outputDirectory,
+        signal: controller.signal,
+      });
+      const report = await readComparison(arguments_.outputDirectory);
+      process.stdout.write(
+        `${JSON.stringify({ schemaVersion: "1", state: index.state, index: join(arguments_.outputDirectory, "batch-index.json"), summary: report.summary })}\n`,
+      );
+      process.exitCode =
+        index.state === "cancelled"
+          ? 130
+          : index.state === "failed" ||
+              report.summary.failed > 0 ||
+              report.summary.interrupted > 0
+            ? 1
+            : 0;
+    }
+  } finally {
+    process.removeListener("SIGINT", cancel);
+    process.removeListener("SIGTERM", cancel);
+  }
 }
 
 main().catch((error: unknown) => {

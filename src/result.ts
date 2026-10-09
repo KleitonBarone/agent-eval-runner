@@ -3,6 +3,7 @@ import { Value } from "@sinclair/typebox/value";
 
 import { RunEventSchema } from "./events.js";
 import { TaskSpecSchema } from "./spec.js";
+import { UsageSchema } from "./usage.js";
 
 const NullableString = Type.Union([Type.String(), Type.Null()]);
 const Termination = Type.Union([
@@ -31,24 +32,44 @@ export const CommandResultSchema = Type.Object(
   { additionalProperties: false },
 );
 
-export const CheckResultSchema = Type.Object(
-  {
-    id: Type.String(),
-    kind: Type.Union([
-      Type.Literal("test"),
-      Type.Literal("lint"),
-      Type.Literal("custom"),
-    ]),
-    status: Type.Union([Type.Literal("passed"), Type.Literal("failed")]),
-    command: CommandResultSchema,
-  },
-  { additionalProperties: false },
-);
+const CheckIdentity = {
+  id: Type.String(),
+  kind: Type.Union([
+    Type.Literal("test"),
+    Type.Literal("lint"),
+    Type.Literal("custom"),
+  ]),
+};
+
+export const CheckResultSchema = Type.Union([
+  Type.Object(
+    {
+      ...CheckIdentity,
+      status: Type.Union([Type.Literal("passed"), Type.Literal("failed")]),
+      command: CommandResultSchema,
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      ...CheckIdentity,
+      status: Type.Literal("skipped"),
+      reason: Type.Union([
+        Type.Literal("cancelled"),
+        Type.Literal("wall_clock_exceeded"),
+        Type.Literal("checkout_failed"),
+        Type.Literal("check_error"),
+      ]),
+      command: Type.Null(),
+    },
+    { additionalProperties: false },
+  ),
+]);
 
 export const ResultSpecSchema = Type.Object(
   {
     $schema: Type.Optional(Type.String()),
-    schemaVersion: Type.Literal("1"),
+    schemaVersion: Type.Literal("2"),
     runner: Type.Object(
       {
         name: Type.Literal("agent-eval-runner"),
@@ -61,6 +82,9 @@ export const ResultSpecSchema = Type.Object(
     ),
     task: TaskSpecSchema,
     taskSha256: Type.String({ pattern: "^[0-9a-f]{64}$" }),
+    comparisonSha256: Type.String({ pattern: "^[0-9a-f]{64}$" }),
+    adapterSha256: Type.String({ pattern: "^[0-9a-f]{64}$" }),
+    usage: UsageSchema,
     status: Type.Union([
       Type.Literal("succeeded"),
       Type.Literal("failed"),
@@ -76,6 +100,9 @@ export const ResultSpecSchema = Type.Object(
     ),
     attempt: Type.Object(
       {
+        id: Type.String({ minLength: 1 }),
+        configurationId: Type.String({ minLength: 1 }),
+        repetition: Type.Integer({ minimum: 1 }),
         adapter: Type.Literal("fake"),
         outcome: Type.Union([
           Type.Literal("completed"),
@@ -93,6 +120,7 @@ export const ResultSpecSchema = Type.Object(
     commands: Type.Array(CommandResultSchema),
     patch: Type.Object(
       {
+        captured: Type.Boolean(),
         bytes: Type.Integer({ minimum: 0 }),
         originalBytes: Type.Integer({ minimum: 0 }),
         sha256: Type.String({ pattern: "^[0-9a-f]{64}$" }),
@@ -120,7 +148,10 @@ export const ResultSpecSchema = Type.Object(
     checks: Type.Array(CheckResultSchema),
     score: Type.Object(
       {
+        version: Type.Literal("2"),
         passed: Type.Integer({ minimum: 0 }),
+        failed: Type.Integer({ minimum: 0 }),
+        skipped: Type.Integer({ minimum: 0 }),
         total: Type.Integer({ minimum: 0 }),
         ratio: Type.Union([
           Type.Number({ minimum: 0, maximum: 1 }),
@@ -140,7 +171,7 @@ export const ResultSpecSchema = Type.Object(
     ),
   },
   {
-    $id: "https://agent-eval-runner.dev/schemas/result-v1.schema.json",
+    $id: "https://agent-eval-runner.dev/schemas/result-v2.schema.json",
     additionalProperties: false,
   },
 );
@@ -156,4 +187,19 @@ export function assertResultSpec(input: unknown): asserts input is ResultSpec {
     .map(({ message, path }) => `${path || "/"}: ${message}`)
     .join("; ");
   throw new Error(`Runner produced an invalid result: ${details}`);
+}
+
+export function parseResultSpec(input: unknown): ResultSpec {
+  if (
+    typeof input === "object" &&
+    input !== null &&
+    "schemaVersion" in input &&
+    input.schemaVersion !== "2"
+  ) {
+    throw new Error(
+      "Unsupported result version. Comparisons require result version 2.",
+    );
+  }
+  assertResultSpec(input);
+  return input;
 }

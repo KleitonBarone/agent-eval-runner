@@ -98,6 +98,11 @@ export type TaskSpec = Static<typeof TaskSpecSchema>;
 
 export function parseTaskSpec(input: unknown): TaskSpec {
   if (Value.Check(TaskSpecSchema, input)) {
+    if (
+      new Set(input.checks.map(({ id }) => id)).size !== input.checks.length
+    ) {
+      throw new Error("Check IDs must be unique");
+    }
     return input;
   }
 

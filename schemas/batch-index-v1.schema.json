@@ -1,0 +1,216 @@
+{
+  "$id": "https://agent-eval-runner.dev/schemas/batch-index-v1.schema.json",
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "id",
+    "batchSha256",
+    "comparisonSha256",
+    "state",
+    "attempts"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "1", "type": "string" },
+    "id": {
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$",
+      "type": "string"
+    },
+    "batchSha256": { "pattern": "^[0-9a-f]{64}$", "type": "string" },
+    "comparisonSha256": { "pattern": "^[0-9a-f]{64}$", "type": "string" },
+    "state": {
+      "anyOf": [
+        { "const": "active", "type": "string" },
+        { "const": "completed", "type": "string" },
+        { "const": "cancelled", "type": "string" },
+        { "const": "failed", "type": "string" }
+      ]
+    },
+    "attempts": {
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "anyOf": [
+          {
+            "additionalProperties": false,
+            "type": "object",
+            "required": [
+              "id",
+              "configurationId",
+              "repetition",
+              "adapterSha256",
+              "state",
+              "resultFile"
+            ],
+            "properties": {
+              "id": {
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$",
+                "type": "string"
+              },
+              "configurationId": {
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$",
+                "type": "string"
+              },
+              "repetition": { "minimum": 1, "type": "integer" },
+              "adapterSha256": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "state": { "const": "pending", "type": "string" },
+              "resultFile": { "type": "null" }
+            }
+          },
+          {
+            "additionalProperties": false,
+            "type": "object",
+            "required": [
+              "id",
+              "configurationId",
+              "repetition",
+              "adapterSha256",
+              "state",
+              "resultFile"
+            ],
+            "properties": {
+              "id": {
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$",
+                "type": "string"
+              },
+              "configurationId": {
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$",
+                "type": "string"
+              },
+              "repetition": { "minimum": 1, "type": "integer" },
+              "adapterSha256": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "state": { "const": "running", "type": "string" },
+              "resultFile": { "type": "string" }
+            }
+          },
+          {
+            "additionalProperties": false,
+            "type": "object",
+            "required": [
+              "id",
+              "configurationId",
+              "repetition",
+              "adapterSha256",
+              "state",
+              "resultFile",
+              "resultSha256"
+            ],
+            "properties": {
+              "id": {
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$",
+                "type": "string"
+              },
+              "configurationId": {
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$",
+                "type": "string"
+              },
+              "repetition": { "minimum": 1, "type": "integer" },
+              "adapterSha256": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "state": { "const": "finished", "type": "string" },
+              "resultFile": { "type": "string" },
+              "resultSha256": { "pattern": "^[0-9a-f]{64}$", "type": "string" }
+            }
+          },
+          {
+            "additionalProperties": false,
+            "type": "object",
+            "required": [
+              "id",
+              "configurationId",
+              "repetition",
+              "adapterSha256",
+              "state",
+              "resultFile",
+              "reason"
+            ],
+            "properties": {
+              "id": {
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$",
+                "type": "string"
+              },
+              "configurationId": {
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$",
+                "type": "string"
+              },
+              "repetition": { "minimum": 1, "type": "integer" },
+              "adapterSha256": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "state": { "const": "not_started", "type": "string" },
+              "resultFile": { "type": "null" },
+              "reason": {
+                "anyOf": [
+                  { "const": "cancelled", "type": "string" },
+                  { "const": "persistence_error", "type": "string" }
+                ]
+              }
+            }
+          },
+          {
+            "additionalProperties": false,
+            "type": "object",
+            "required": [
+              "id",
+              "configurationId",
+              "repetition",
+              "adapterSha256",
+              "state",
+              "resultFile",
+              "error"
+            ],
+            "properties": {
+              "id": {
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$",
+                "type": "string"
+              },
+              "configurationId": {
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$",
+                "type": "string"
+              },
+              "repetition": { "minimum": 1, "type": "integer" },
+              "adapterSha256": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "state": { "const": "persistence_failed", "type": "string" },
+              "resultFile": { "type": "null" },
+              "error": { "type": "string" }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

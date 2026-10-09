@@ -1,4 +1,4 @@
-import { Type, type TProperties } from "@sinclair/typebox";
+import { Type, type Static, type TProperties } from "@sinclair/typebox";
 
 const EventMetadata = {
   sequence: Type.Integer({ minimum: 0 }),
@@ -55,6 +55,11 @@ export const RunEventSchema = Type.Union([
     status: Type.Union([Type.Literal("passed"), Type.Literal("failed")]),
   }),
   eventSchema({
+    type: Type.Literal("check.skipped"),
+    checkId: Type.String(),
+    reason: Type.String(),
+  }),
+  eventSchema({
     type: Type.Literal("score.computed"),
     passed: Type.Integer({ minimum: 0 }),
     total: Type.Integer({ minimum: 0 }),
@@ -69,35 +74,12 @@ export const RunEventSchema = Type.Union([
   }),
 ]);
 
-export type RunEventData =
-  | { type: "run.started" }
-  | { type: "checkout.prepared"; revision: string }
-  | { type: "agent.started"; adapter: "fake" }
-  | {
-      type: "command.started";
-      commandId: string;
-      command: string;
-      args: string[];
-    }
-  | {
-      type: "command.finished";
-      commandId: string;
-      exitCode: number | null;
-      termination: string | null;
-    }
-  | { type: "budget.exceeded"; budget: "commands" | "wall_clock" }
-  | { type: "agent.finished"; outcome: string }
-  | { type: "patch.captured"; bytes: number }
-  | { type: "artifact.captured"; path: string; bytes: number }
-  | { type: "check.started"; checkId: string }
-  | { type: "check.finished"; checkId: string; status: "passed" | "failed" }
-  | { type: "score.computed"; passed: number; total: number }
-  | { type: "run.finished"; status: "succeeded" | "failed" | "interrupted" };
-
-export type RunEvent = RunEventData & {
-  sequence: number;
-  elapsedMs: number;
-};
+export const RunEventDataSchema = Type.Omit(RunEventSchema, [
+  "sequence",
+  "elapsedMs",
+]);
+export type RunEventData = Static<typeof RunEventDataSchema>;
+export type RunEvent = Static<typeof RunEventSchema>;
 
 export class EventRecorder {
   readonly events: RunEvent[] = [];
