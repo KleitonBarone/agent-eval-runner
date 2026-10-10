@@ -12,6 +12,7 @@ import {
   writeComparison,
 } from "../src/comparison.js";
 import { canonicalJson, sha256 } from "../src/identity.js";
+import { initialExecutionEvidence } from "../src/execution-spec.js";
 import { jsonDocument } from "../src/persistence.js";
 import { parseResultSpec, type ResultSpec } from "../src/result.js";
 import { batchFor } from "./helpers/batch.js";
@@ -99,9 +100,60 @@ describe("saved-result comparisons", () => {
     expect(() => compare({ ...result, checks: [] })).toThrow(
       "Incomplete check",
     );
+    expect(() =>
+      compare({
+        ...result,
+        execution: initialExecutionEvidence({
+          kind: "docker",
+          image: `node@sha256:${"a".repeat(64)}`,
+        }),
+      }),
+    ).toThrow("Execution identity");
     expect(() => parseResultSpec({ ...result, schemaVersion: "1" })).toThrow(
-      "require result version 2",
+      "require result version 3",
     );
+    expect(() => parseResultSpec({ ...result, schemaVersion: "2" })).toThrow(
+      "require result version 3",
+    );
+  });
+
+  it("compares container runtimes without treating generated container IDs as runtime differences", async () => {
+    const { index, entry, result } = await savedBatch();
+    const execution = initialExecutionEvidence({
+      kind: "docker",
+      image: `node@sha256:${"a".repeat(64)}`,
+    });
+    if (execution.kind !== "docker") throw new Error("Expected Docker fixture");
+    const isolated = {
+      ...result,
+      task: {
+        ...result.task,
+        execution: { kind: "docker", image: execution.requestedImage },
+      },
+      execution,
+    } satisfies ResultSpec;
+    const second = {
+      ...isolated,
+      attempt: { ...result.attempt, id: "second", repetition: 2 },
+      execution: { ...execution, containerId: "different-id" },
+    } satisfies ResultSpec;
+    const repeated = {
+      ...index,
+      attempts: [entry, { ...entry, id: "second", repetition: 2 }],
+    };
+    const compare = () =>
+      createComparison(
+        repeated,
+        new Map([
+          [entry.id, isolated],
+          ["second", second],
+        ]),
+      );
+    expect(compare().warnings).toEqual([]);
+    second.execution.engineVersion = "different-engine";
+    expect(compare().warnings).toEqual([
+      "Runtime identities differ. Durations and executable behavior may not be comparable.",
+    ]);
   });
 
   it("preserves scheduling order, warns about differing runtimes, and propagates missing usage", async () => {

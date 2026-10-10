@@ -2,6 +2,7 @@ import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
 import { RunEventSchema } from "./events.js";
+import { ExecutionEvidenceSchema } from "./execution-spec.js";
 import { TaskSpecSchema } from "./spec.js";
 import { UsageSchema } from "./usage.js";
 
@@ -59,6 +60,7 @@ export const CheckResultSchema = Type.Union([
         Type.Literal("wall_clock_exceeded"),
         Type.Literal("checkout_failed"),
         Type.Literal("check_error"),
+        Type.Literal("execution_failed"),
       ]),
       command: Type.Null(),
     },
@@ -69,7 +71,8 @@ export const CheckResultSchema = Type.Union([
 export const ResultSpecSchema = Type.Object(
   {
     $schema: Type.Optional(Type.String()),
-    schemaVersion: Type.Literal("2"),
+    schemaVersion: Type.Literal("3"),
+    execution: ExecutionEvidenceSchema,
     runner: Type.Object(
       {
         name: Type.Literal("agent-eval-runner"),
@@ -171,7 +174,7 @@ export const ResultSpecSchema = Type.Object(
     ),
   },
   {
-    $id: "https://agent-eval-runner.dev/schemas/result-v2.schema.json",
+    $id: "https://agent-eval-runner.dev/schemas/result-v3.schema.json",
     additionalProperties: false,
   },
 );
@@ -194,10 +197,10 @@ export function parseResultSpec(input: unknown): ResultSpec {
     typeof input === "object" &&
     input !== null &&
     "schemaVersion" in input &&
-    input.schemaVersion !== "2"
+    input.schemaVersion !== "3"
   ) {
     throw new Error(
-      "Unsupported result version. Comparisons require result version 2.",
+      "Unsupported result version. Comparisons require result version 3.",
     );
   }
   assertResultSpec(input);

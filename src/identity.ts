@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 
 import type { TaskSpec } from "./spec.js";
+import { executionIdentity } from "./execution-spec.js";
 
 export const DEFAULT_MAX_ARTIFACT_BYTES = 1024 * 1024;
 
@@ -43,6 +44,7 @@ export function comparisonDigest(task: Omit<TaskSpec, "adapter">): string {
       },
       checks: task.checks,
       artifacts: task.artifacts,
+      execution: executionIdentity(task.execution),
     }),
   );
 }

@@ -38,13 +38,16 @@ Failed and interrupted result preservation shipped in milestone 1. Version 0.2.0
 
 ## 3. Real adapters and stronger isolation
 
+- [x] Add an opt-in restricted Linux Docker backend for trusted fake-agent fixtures
 - [ ] Add the first real coding-agent adapter
 - [ ] Add credential redaction and an explicit secret boundary
 - [ ] Enforce network and filesystem policies
 - [ ] Add resumable execution and cancellation
 - [ ] Publish a small, versioned evaluation suite
 
-Basic text redaction and signal-driven cancellation shipped in version 0.1.0; version 0.2.0 adds batch cancellation and explicit unstarted entries. Neither release provides a complete secret/security boundary, hard process containment, or resumable execution, so those items remain open. No real adapter or paid-model execution was added.
+The first slice ships in version 0.3.0. Docker execution uses a preinstalled digest-pinned image, a copied workspace without `.git`, fixed offline/non-root/read-only-root settings, memory/CPU/PID limits, and whole-container termination after every command. Result v3 and comparison v2 preserve image, runtime, policy, and cleanup evidence. Scoring remains version 2. Local execution remains available; unsupported Docker environments never fall back to it. `pnpm example:isolated` verifies containment probes, detached children, budgets, cancellation, failed/interrupted evidence, repeated attempts, and report regeneration on Linux. CI runs this path without publishing results.
+
+Basic text redaction and signal-driven cancellation shipped in version 0.1.0; version 0.2.0 adds batch cancellation and explicit unstarted entries. The restricted backend is not authorization to execute hostile repositories. Checkout still runs on the host, containers share the host kernel, and there is no credential broker, controlled provider egress, disk quota, token/cost enforcement, or resume. The broader security items remain open pending that work and adversarial review. See [the isolation decisions and next gates](docs/isolation.md). No real adapter or paid-model execution was added.
 
 ## Later, if justified
 

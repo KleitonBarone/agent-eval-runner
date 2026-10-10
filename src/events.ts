@@ -15,6 +15,11 @@ function eventSchema<T extends TProperties>(properties: T) {
 export const RunEventSchema = Type.Union([
   eventSchema({ type: Type.Literal("run.started") }),
   eventSchema({
+    type: Type.Literal("execution.prepared"),
+    kind: Type.Union([Type.Literal("local"), Type.Literal("docker")]),
+    policyVersion: Type.String(),
+  }),
+  eventSchema({
     type: Type.Literal("checkout.prepared"),
     revision: Type.String(),
   }),

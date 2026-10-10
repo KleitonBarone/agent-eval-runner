@@ -1,6 +1,8 @@
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
+import { ExecutionConfigSchema } from "./execution-spec.js";
+
 const Identifier = Type.String({
   minLength: 1,
   maxLength: 128,
@@ -44,6 +46,7 @@ export const TaskSpecSchema = Type.Object(
       { additionalProperties: false },
     ),
     prompt: Type.String({ minLength: 1 }),
+    execution: Type.Optional(ExecutionConfigSchema),
     adapter: Type.Object(
       {
         kind: Type.Literal("fake"),

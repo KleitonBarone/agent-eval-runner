@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": ".agent-eval/isolation-tools",
+    "rootDir": ".",
+    "types": ["node"]
+  },
+  "include": ["src", "scripts/run-isolated-example.ts", "test/helpers"]
+}

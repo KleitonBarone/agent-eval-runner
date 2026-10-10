@@ -9,10 +9,10 @@ import { TaskSpecSchema } from "../src/spec.js";
 
 const schemas = [
   ["schemas/task-v1.schema.json", TaskSpecSchema],
-  ["schemas/result-v2.schema.json", ResultSpecSchema],
+  ["schemas/result-v3.schema.json", ResultSpecSchema],
   ["schemas/batch-v1.schema.json", BatchSpecSchema],
   ["schemas/batch-index-v1.schema.json", BatchIndexSchema],
-  ["schemas/comparison-v1.schema.json", ComparisonSpecSchema],
+  ["schemas/comparison-v2.schema.json", ComparisonSpecSchema],
 ] as const;
 const mode = process.argv[2];
 if (mode !== "--check" && mode !== "--write") {

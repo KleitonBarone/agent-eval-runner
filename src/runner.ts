@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 
 import { captureArtifact, type CapturedArtifact } from "./artifacts.js";
 import { EventRecorder } from "./events.js";
+import { createExecutionBackend, type ExecutionBackend } from "./execution.js";
+import { initialExecutionEvidence } from "./execution-spec.js";
 import { runFakeAgent } from "./fake-agent.js";
 import {
   capturePatch,
@@ -17,7 +19,7 @@ import {
 } from "./identity.js";
 import { resolveInside } from "./paths.js";
 import { writeJsonAtomic } from "./persistence.js";
-import { runProcess, type ProcessResult } from "./process.js";
+import type { ProcessResult } from "./process.js";
 import {
   collectTaskSecrets,
   createRedactor,
@@ -93,6 +95,9 @@ function sanitizeTask(task: TaskSpec, redact: Redactor): TaskSpec {
       revision: task.repository.revision,
     },
     prompt: redact(task.prompt),
+    ...(task.execution === undefined
+      ? {}
+      : { execution: { ...task.execution } }),
     adapter: { kind: "fake", actions },
     budgets: { ...task.budgets },
     checks,
@@ -130,11 +135,15 @@ export async function runEvaluation(
   const checks: CheckResult[] = [];
   const artifacts: CapturedArtifact[] = [];
   let checkout: PreparedCheckout | undefined;
+  let backend: ExecutionBackend | undefined;
+  let executionPrepared = false;
+  const execution = initialExecutionEvidence(task.execution);
   let attemptOutcome: ResultSpec["attempt"]["outcome"] = "runner_error";
   let attemptDurationMs = 0;
   let commandCount = 0;
   let patchContent = "";
   let patchCaptured = false;
+  let retainIsolationWorkspace = false;
 
   if (options.signal?.aborted === true) {
     attemptOutcome = "cancelled";
@@ -154,6 +163,28 @@ export async function runEvaluation(
   }
 
   if (checkout !== undefined) {
+    backend = createExecutionBackend(
+      task.execution,
+      checkout,
+      execution,
+      redact,
+    );
+    try {
+      await backend.prepare(options.signal);
+      executionPrepared = true;
+      recorder.record({
+        type: "execution.prepared",
+        kind: execution.kind,
+        policyVersion: execution.policyVersion,
+      });
+    } catch (error) {
+      if (options.signal?.aborted === true) attemptOutcome = "cancelled";
+      addError("execution", error);
+    }
+  }
+
+  if (checkout !== undefined && backend !== undefined && executionPrepared) {
+    const executor = backend;
     const workspace = checkout.path;
     const startedAt = performance.now();
     const deadline = startedAt + task.budgets.wallClockMs;
@@ -163,7 +194,13 @@ export async function runEvaluation(
     recorder.record({ type: "agent.started", adapter: "fake" });
     try {
       attemptOutcome = await runFakeAgent({
-        workspace,
+        writeFile: (action) =>
+          executor.writeFile(
+            action.path,
+            action.content,
+            Math.max(1, Math.floor(deadline - performance.now())),
+            options.signal,
+          ),
         actions: task.adapter.actions,
         deadline,
         ...(options.signal === undefined ? {} : { signal: options.signal }),
@@ -192,21 +229,16 @@ export async function runEvaluation(
             command: redact(action.command),
             args: action.args.map(redact),
           });
-          const result = await runProcess(
-            {
-              command: action.command,
-              args: action.args,
-              cwd,
-              ...(action.env === undefined ? {} : { env: action.env }),
-              timeoutMs: remainingMs,
-              timeoutTermination: "wall_clock",
-              maxOutputBytes: task.budgets.maxOutputBytes,
-              ...(options.signal === undefined
-                ? {}
-                : { signal: options.signal }),
-            },
-            redact,
-          );
+          const result = await executor.execute({
+            command: action.command,
+            args: action.args,
+            cwd,
+            ...(action.env === undefined ? {} : { env: action.env }),
+            timeoutMs: remainingMs,
+            timeoutTermination: "wall_clock",
+            maxOutputBytes: task.budgets.maxOutputBytes,
+            ...(options.signal === undefined ? {} : { signal: options.signal }),
+          });
           commands.push(commandEvidence(id, redact(relativeCwd), result));
           recorder.record({
             type: "command.finished",
@@ -239,6 +271,7 @@ export async function runEvaluation(
     }
 
     try {
+      await executor.synchronize();
       patchContent = await capturePatch(workspace);
       patchCaptured = true;
       recorder.record({
@@ -246,12 +279,17 @@ export async function runEvaluation(
         bytes: Buffer.byteLength(patchContent),
       });
     } catch (error) {
+      if (execution.kind === "docker") retainIsolationWorkspace = true;
       addError("patch", error);
     }
     for (const descriptor of task.artifacts) {
       try {
+        if (!executor.quiescent)
+          throw new Error(
+            "Cannot capture artifacts while container processes may be running",
+          );
         const artifact = await captureArtifact(
-          workspace,
+          executor.workspace,
           descriptor,
           task.budgets.maxArtifactBytes ?? DEFAULT_MAX_ARTIFACT_BYTES,
           redact,
@@ -263,6 +301,7 @@ export async function runEvaluation(
           bytes: artifact.bytes,
         });
       } catch (error) {
+        if (execution.kind === "docker") retainIsolationWorkspace = true;
         addError("artifact", error);
       }
     }
@@ -274,9 +313,11 @@ export async function runEvaluation(
         ? "cancelled"
         : checkout === undefined
           ? "checkout_failed"
-          : attemptOutcome === "wall_clock_exceeded"
-            ? "wall_clock_exceeded"
-            : null;
+          : !executionPrepared
+            ? "execution_failed"
+            : attemptOutcome === "wall_clock_exceeded"
+              ? "wall_clock_exceeded"
+              : null;
     if (skipReason !== null) {
       checks.push({
         id: check.id,
@@ -295,23 +336,21 @@ export async function runEvaluation(
     // The non-null checkout follows from skipReason; keep the runtime boundary explicit.
     if (checkout === undefined)
       throw new Error("Missing checkout for a runnable check");
+    if (backend === undefined) throw new Error("Missing execution backend");
     try {
       const relativeCwd = check.cwd ?? ".";
       const cwd = resolveInside(checkout.path, relativeCwd);
       recorder.record({ type: "check.started", checkId: check.id });
-      const result = await runProcess(
-        {
-          command: check.command,
-          args: check.args,
-          cwd,
-          ...(check.env === undefined ? {} : { env: check.env }),
-          timeoutMs: check.timeoutMs,
-          timeoutTermination: "check_timeout",
-          maxOutputBytes: task.budgets.maxOutputBytes,
-          ...(options.signal === undefined ? {} : { signal: options.signal }),
-        },
-        redact,
-      );
+      const result = await backend.execute({
+        command: check.command,
+        args: check.args,
+        cwd,
+        ...(check.env === undefined ? {} : { env: check.env }),
+        timeoutMs: check.timeoutMs,
+        timeoutTermination: "check_timeout",
+        maxOutputBytes: task.budgets.maxOutputBytes,
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      });
       const status =
         result.exitCode === 0 &&
         result.termination === null &&
@@ -346,6 +385,13 @@ export async function runEvaluation(
     }
   }
 
+  if (backend !== undefined) {
+    try {
+      await backend.dispose();
+    } catch (error) {
+      addError("container cleanup", error);
+    }
+  }
   const score = scoreChecks(checks);
   recorder.record({
     type: "score.computed",
@@ -365,11 +411,12 @@ export async function runEvaluation(
       : "failed";
   const redactedPatch = redact(patchContent);
   const result: ResultSpec = {
-    $schema: "https://agent-eval-runner.dev/schemas/result-v2.schema.json",
-    schemaVersion: "2",
+    $schema: "https://agent-eval-runner.dev/schemas/result-v3.schema.json",
+    schemaVersion: "3",
+    execution,
     runner: {
       name: "agent-eval-runner",
-      version: "0.2.0",
+      version: "0.3.0",
       node: process.version,
       platform: process.platform,
       arch: process.arch,
@@ -419,8 +466,13 @@ export async function runEvaluation(
   // leave that checkout available for recovery and propagate the persistence error.
   if (options.outputPath !== undefined)
     await writeJsonAtomic(options.outputPath, result);
-  if (checkout !== undefined && options.keepWorktree !== true) {
+  if (
+    checkout !== undefined &&
+    options.keepWorktree !== true &&
+    !retainIsolationWorkspace
+  ) {
     try {
+      await backend?.removeWorkspace();
       await removeCheckout(checkout);
       result.workspace = { retained: false, path: null };
     } catch (error) {

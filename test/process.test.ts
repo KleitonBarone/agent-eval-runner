@@ -20,3 +20,20 @@ it("terminates commands even when the abort signal was already raised", async ()
   );
   expect(result.termination).toBe("cancelled");
 });
+
+it("captures and redacts output from piped input", async () => {
+  const result = await runProcess(
+    {
+      command: process.execPath,
+      args: ["-e", "process.stdin.pipe(process.stdout)"],
+      input: "API_KEY=private-stdin-value\n",
+      cwd: process.cwd(),
+      timeoutMs: 2000,
+      timeoutTermination: "check_timeout",
+      maxOutputBytes: 1024,
+    },
+    createRedactor([]),
+  );
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout).toBe("API_KEY=[REDACTED]\n");
+});

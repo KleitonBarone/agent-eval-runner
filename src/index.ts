@@ -13,3 +13,8 @@ export {
 export type { ComparisonSpec } from "./comparison-spec.js";
 export { parseResultSpec } from "./result.js";
 export type { Usage, UsageMetric } from "./usage.js";
+export {
+  ExecutionConfigSchema,
+  ExecutionEvidenceSchema,
+} from "./execution-spec.js";
+export type { ExecutionConfig, ExecutionEvidence } from "./execution-spec.js";

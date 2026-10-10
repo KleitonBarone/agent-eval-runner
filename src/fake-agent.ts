@@ -1,7 +1,3 @@
-import { mkdir, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
-
-import { resolveInside } from "./paths.js";
 import type { ProcessResult } from "./process.js";
 import type { TaskSpec } from "./spec.js";
 
@@ -15,7 +11,9 @@ export type FakeAgentOutcome =
   | "cancelled";
 
 export interface FakeAgentContext {
-  readonly workspace: string;
+  readonly writeFile: (
+    action: Extract<FakeAction, { kind: "writeFile" }>,
+  ) => Promise<"wall_clock" | "cancelled" | null>;
   readonly actions: readonly FakeAction[];
   readonly execute: (
     action: Extract<FakeAction, { kind: "runCommand" }>,
@@ -34,9 +32,9 @@ export async function runFakeAgent(
     if (performance.now() >= context.deadline) return "wall_clock_exceeded";
 
     if (action.kind === "writeFile") {
-      const target = resolveInside(context.workspace, action.path);
-      await mkdir(dirname(target), { recursive: true });
-      await writeFile(target, action.content, "utf8");
+      const termination = await context.writeFile(action);
+      if (termination === "cancelled") return "cancelled";
+      if (termination === "wall_clock") return "wall_clock_exceeded";
       continue;
     }
 
@@ -44,7 +42,7 @@ export async function runFakeAgent(
     if (result === null) return context.outcomeAfterSkippedCommand();
     if (result.termination === "cancelled") return "cancelled";
     if (result.termination === "wall_clock") return "wall_clock_exceeded";
-    if (result.exitCode !== 0) return "agent_failed";
+    if (result.exitCode !== 0 || result.error !== null) return "agent_failed";
   }
   return "completed";
 }

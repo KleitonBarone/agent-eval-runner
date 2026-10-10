@@ -22,6 +22,8 @@ import {
   type FinishedComparisonRow,
 } from "./comparison-spec.js";
 import { canonicalJson, sha256 } from "./identity.js";
+import { executionIdentity } from "./execution-spec.js";
+import type { ExecutionEvidence } from "./execution-spec.js";
 import { resolveInside } from "./paths.js";
 import { writeAtomic, writeJsonAtomic } from "./persistence.js";
 import { parseResultSpec, type ResultSpec } from "./result.js";
@@ -33,6 +35,14 @@ function verifyResult(
   entry: Extract<BatchEntry, { state: "finished" }>,
   comparisonSha256: string,
 ): void {
+  const configuredExecution = executionIdentity(result.task.execution);
+  if (
+    configuredExecution.kind !== result.execution.kind ||
+    (result.execution.kind === "docker" &&
+      (result.task.execution?.kind !== "docker" ||
+        result.execution.requestedImage !== result.task.execution.image))
+  )
+    throw new Error(`Execution identity does not match task for ${entry.id}`);
   if (result.comparisonSha256 !== comparisonSha256)
     throw new Error(`Incompatible task inputs for ${entry.id}`);
   if (
@@ -67,6 +77,21 @@ function verifyResult(
   }
 }
 
+function executionRuntime(execution: ExecutionEvidence) {
+  return execution.kind === "local"
+    ? execution
+    : {
+        kind: execution.kind,
+        policyVersion: execution.policyVersion,
+        imageId: execution.imageId,
+        architecture: execution.architecture,
+        node: execution.node,
+        engineVersion: execution.engineVersion,
+        uid: execution.uid,
+        gid: execution.gid,
+      };
+}
+
 export function createComparison(
   index: BatchIndex,
   results: ReadonlyMap<string, ResultSpec>,
@@ -90,6 +115,7 @@ export function createComparison(
       adapter: result.task.adapter,
       runner: result.runner,
       source: result.source,
+      execution: result.execution,
       status: result.status,
       outcome: result.attempt.outcome,
       score: result.score,
@@ -125,11 +151,14 @@ export function createComparison(
       ]
     : [];
   const warnings: string[] = [];
-  const firstRunner = finished[0]?.runner;
+  const first = finished[0];
   if (
-    firstRunner !== undefined &&
+    first !== undefined &&
     finished.some(
-      ({ runner }) => canonicalJson(runner) !== canonicalJson(firstRunner),
+      ({ runner, execution }) =>
+        canonicalJson(runner) !== canonicalJson(first.runner) ||
+        canonicalJson(executionRuntime(execution)) !==
+          canonicalJson(executionRuntime(first.execution)),
     )
   ) {
     warnings.push(
@@ -141,7 +170,7 @@ export function createComparison(
       `Batch state is ${index.state}; some attempts may be unfinished.`,
     );
   const report: ComparisonSpec = {
-    schemaVersion: "1",
+    schemaVersion: "2",
     batchId: index.id,
     comparisonSha256: index.comparisonSha256,
     scoringVersion: "2",
@@ -290,6 +319,8 @@ export function renderMarkdown(report: ComparisonSpec): string {
     if (row.state === "finished") {
       lines.push(
         `Runtime: ${escapeMarkdown(canonicalJson(row.runner))}`,
+        "",
+        `Execution: ${escapeMarkdown(canonicalJson(row.execution))}`,
         "",
         `Adapter digest: ${row.adapterSha256}`,
         "",

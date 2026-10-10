@@ -13,6 +13,7 @@ export interface ProcessRequest {
   readonly timeoutTermination: Exclude<ProcessTermination, "cancelled">;
   readonly maxOutputBytes: number;
   readonly signal?: AbortSignal;
+  readonly input?: string;
 }
 
 export interface ProcessResult {
@@ -96,7 +97,7 @@ export async function runProcess(
     cwd: request.cwd,
     env: childEnvironment(request.env),
     detached: true,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,
   });
 
@@ -127,6 +128,11 @@ export async function runProcess(
   child.once("error", (error) => {
     spawnError = redact(error.message);
   });
+  child.stdin.on("error", (error: Error) => {
+    if (!("code" in error) || error.code !== "EPIPE")
+      spawnError = redact(error.message);
+  });
+  child.stdin.end(request.input);
 
   const terminate = (reason: ProcessTermination): void => {
     if (termination !== null || child.exitCode !== null) return;

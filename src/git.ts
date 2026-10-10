@@ -61,6 +61,7 @@ export async function capturePatch(checkoutPath: string): Promise<string> {
     "diff",
     "--binary",
     "--no-ext-diff",
+    "--no-textconv",
     "--no-color",
     "HEAD",
     "--",
