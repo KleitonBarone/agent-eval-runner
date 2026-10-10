@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
@@ -56,6 +56,7 @@ export async function removeTestWorktree(
 export async function retainedTestWorktrees(
   repositoryPath: string,
 ): Promise<string[]> {
+  const repositoryRoot = resolve(await realpath(repositoryPath)).toLowerCase();
   const { stdout } = await execFileAsync("git", [
     "-C",
     repositoryPath,
@@ -67,10 +68,7 @@ export async function retainedTestWorktrees(
     .split("\n")
     .filter((line) => line.startsWith("worktree "))
     .map((line) => line.slice("worktree ".length).trim())
-    .filter(
-      (path) =>
-        resolve(path).toLowerCase() !== resolve(repositoryPath).toLowerCase(),
-    );
+    .filter((path) => resolve(path).toLowerCase() !== repositoryRoot);
 }
 
 export async function cleanupTestRepositories(): Promise<void> {

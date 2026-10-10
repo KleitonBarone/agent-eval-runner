@@ -1,4 +1,4 @@
-import { watch } from "node:fs";
+import { realpathSync, watch } from "node:fs";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -169,7 +169,9 @@ describe("sequential batches", () => {
       },
     ];
     const controller = new AbortController();
-    const watcher = watch(repository.path, (_event, filename) => {
+    // Windows 8.3 temp paths can trigger a native libuv watcher assertion.
+    const watchDirectory = realpathSync.native(repository.path);
+    const watcher = watch(watchDirectory, (_event, filename) => {
       if (String(filename) === "ready") controller.abort();
     });
     const directory = join(repository.path, "results");
