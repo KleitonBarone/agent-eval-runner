@@ -1,14 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import {
-  access,
-  mkdir,
-  mkdtemp,
-  readFile,
-  readdir,
-  writeFile,
-} from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { networkInterfaces, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -19,6 +12,7 @@ import { runBatch } from "../src/batch.js";
 import { parseResultSpec, type ResultSpec } from "../src/result.js";
 import { writeJsonAtomic } from "../src/persistence.js";
 import { SAFETY_POLICY } from "../src/safety.js";
+import { CONTAINER_POLICY } from "../src/execution-spec.js";
 import { runEvaluation } from "../src/runner.js";
 import type { TaskSpec } from "../src/spec.js";
 import {
@@ -103,6 +97,8 @@ async function savedAttempt(
   assert.deepEqual(result.safety, SAFETY_POLICY);
   assert.equal(result.execution.kind, "docker");
   assert.equal(result.execution.cleanup, "removed");
+  assert.equal(result.execution.storage.verified, true);
+  assert.ok(["removed", "retained"].includes(result.execution.storage.cleanup));
   assert.match(result.execution.imageId ?? "", /^sha256:[0-9a-f]{64}$/u);
   assert.equal(result.execution.node, "v24.20.0");
   assert.deepEqual(
@@ -351,21 +347,46 @@ try {
     "cancelled",
     { signal: controller.signal },
   );
+  let pollingActive = false;
   const polling = setInterval(() => {
-    void readdir(fixtureRoot).then(async (entries) => {
-      for (const entry of entries.filter((name) =>
-        name.startsWith("agent-eval-isolated-"),
-      )) {
-        if (
-          await access(join(fixtureRoot, entry, "workspace", ready)).then(
-            () => true,
-            () => false,
-          )
-        )
-          controller.abort();
+    if (pollingActive) return;
+    pollingActive = true;
+    void (async () => {
+      const { stdout } = await execFileAsync("docker", [
+        "--host",
+        "unix:///var/run/docker.sock",
+        "ps",
+        "--filter",
+        "label=agent-eval-runner",
+        "--format",
+        "{{.Names}}",
+      ]);
+      for (const name of stdout
+        .trim()
+        .split("\n")
+        .filter((value) => /^agent-eval-[a-f0-9-]+-holder$/u.test(value))) {
+        const found = await execFileAsync("docker", [
+          "--host",
+          "unix:///var/run/docker.sock",
+          "exec",
+          name,
+          "/usr/local/bin/node",
+          "-e",
+          `process.exit(require('node:fs').existsSync(${JSON.stringify(`/workspace/${ready}`)})?0:1)`,
+        ]).then(
+          () => true,
+          () => false,
+        );
+        if (found) controller.abort();
       }
-    });
-  }, 25);
+    })()
+      .catch(() => {
+        // A holder may disappear between listing and probing. The fallback still cancels.
+      })
+      .finally(() => {
+        pollingActive = false;
+      });
+  }, 250);
   const fallback = setTimeout(() => {
     controller.abort();
   }, 20_000);
@@ -380,6 +401,74 @@ try {
   assert.equal(cancelled.commands[0]?.termination, "cancelled");
   assert.equal(cancelled.artifacts.length, 1);
   assert.match(cancelled.commands[0].stdout, /before-cancel/u);
+
+  // Trusted writes deliberately reach kernel ENOSPC, then release filler files.
+  // The failing command's output, prior patch, artifacts, and later checks survive.
+  for (const root of ["/workspace", "/tmp"]) {
+    for (const resource of ["bytes", "inodes"]) {
+      const label = `${root.slice(1)}-${resource}`;
+      const count =
+        resource === "bytes" ? 40 : CONTAINER_POLICY.workspaceInodes + 2;
+      const exhaust = `const fs=require('node:fs');const assert=require('node:assert/strict');const dir=${JSON.stringify(`${root}/filler`)};fs.mkdirSync(dir);let exhausted=false;try{for(let i=0;i<${String(count)};i++)fs.writeFileSync(dir+'/'+i,${resource === "bytes" ? "Buffer.alloc(8*1024*1024,1)" : "''"});}catch(error){assert.equal(error.code,'ENOSPC');exhausted=true;console.log(${JSON.stringify(`ENOSPC:${label}`)});}finally{fs.rmSync(dir,{recursive:true});}assert.equal(exhausted,true);fs.writeFileSync('/workspace/quota.txt',${JSON.stringify(`ENOSPC:${label}\n`)});process.exitCode=1;`;
+      const quota = await savedAttempt(
+        {
+          ...base,
+          artifacts: [
+            ...base.artifacts,
+            { path: "quota.txt", mediaType: "text/plain" },
+          ],
+          adapter: {
+            kind: "fake",
+            actions: [
+              ...base.adapter.actions,
+              { kind: "runCommand", command: "node", args: ["-e", exhaust] },
+            ],
+          },
+        },
+        label,
+      );
+      assert.equal(quota.status, "failed");
+      assert.equal(quota.attempt.outcome, "agent_failed");
+      assert.equal(quota.commands[0]?.stdout.trim(), `ENOSPC:${label}`);
+      assert.equal(quota.commands[0].exitCode, 1);
+      assert.equal(quota.patch.captured, true, quota.errors.join("\n"));
+      assert.match(quota.patch.content, /quota\.txt/u);
+      assert.equal(quota.artifacts.length, 2);
+      assert.equal(quota.score.ratio, 1);
+      assert.equal(quota.execution.kind, "docker");
+      assert.equal(quota.execution.storage.cleanup, "removed");
+      assert.equal(await readFile(hostSentinel, "utf8"), "host-only-sentinel");
+      if (root === "/workspace" && resource === "bytes") {
+        const checkQuota = await savedAttempt(
+          {
+            ...base,
+            checks: [
+              {
+                id: "quota-check",
+                kind: "test",
+                command: "node",
+                args: ["-e", exhaust],
+                timeoutMs: 10_000,
+              },
+              ...base.checks,
+            ],
+          },
+          "check-workspace-bytes",
+        );
+        assert.equal(checkQuota.status, "failed");
+        assert.equal(checkQuota.attempt.outcome, "completed");
+        assert.equal(
+          checkQuota.checks[0]?.command?.stdout.trim(),
+          "ENOSPC:workspace-bytes",
+        );
+        assert.equal(checkQuota.score.passed, 2);
+        assert.equal(checkQuota.score.failed, 1);
+        assert.equal(checkQuota.artifacts.length, 1);
+        assert.equal(checkQuota.patch.captured, true);
+        assert.doesNotMatch(checkQuota.patch.content, /quota\.txt/u);
+      }
+    }
+  }
 
   const oversizedExport = await savedAttempt(
     {
@@ -408,6 +497,8 @@ try {
   assert.equal(oversizedExport.artifacts.length, 1);
   assert.equal(oversizedExport.workspace.retained, true);
   assert.match(oversizedExport.errors.join("\n"), /file byte limit/u);
+  assert.equal(oversizedExport.execution.kind, "docker");
+  assert.equal(oversizedExport.execution.storage.cleanup, "retained");
 
   const unsafeExport = await savedAttempt(
     {
@@ -441,11 +532,60 @@ try {
   assert.ok(unsafeExport.execution.workspacePath);
   await access(join(unsafeExport.execution.workspacePath, "answer.txt"));
   assert.equal(unsafeExport.artifacts.length, 1);
+  assert.equal(unsafeExport.execution.storage.cleanup, "retained");
   assert.equal(
     JSON.stringify(unsafeExport).includes("host-only-sentinel"),
     false,
   );
   assert.match(unsafeExport.errors.join("\n"), /single-link regular files/su);
+
+  for (const [retained, probe] of [
+    [
+      oversizedExport,
+      "require('node:fs').statSync('/workspace/large.bin').size",
+    ],
+    [
+      unsafeExport,
+      "require('node:fs').lstatSync('/workspace/escape.txt').isSymbolicLink()",
+    ],
+  ] as const) {
+    assert.equal(retained.execution.kind, "docker");
+    const holder = retained.execution.storage.holderName;
+    const volume = retained.execution.storage.volumeName;
+    assert.ok(holder);
+    assert.ok(volume);
+    const state = await execFileAsync("docker", [
+      "--host",
+      "unix:///var/run/docker.sock",
+      "inspect",
+      "--format",
+      "{{.State.Running}} {{(index .Mounts 0).RW}}",
+      holder,
+    ]);
+    assert.equal(state.stdout.trim(), "true false");
+    await execFileAsync("docker", [
+      "--host",
+      "unix:///var/run/docker.sock",
+      "volume",
+      "inspect",
+      volume,
+    ]);
+    const raw = await execFileAsync("docker", [
+      "--host",
+      "unix:///var/run/docker.sock",
+      "exec",
+      holder,
+      "/usr/local/bin/node",
+      "-p",
+      probe,
+    ]);
+    assert.equal(
+      raw.stdout.trim(),
+      retained === oversizedExport
+        ? String(SAFETY_POLICY.fileBytes + 1)
+        : "true",
+    );
+  }
 
   const batchDirectory = join(output, "batch");
   const { adapter, ...shared } = base;
@@ -490,6 +630,22 @@ try {
       () => false,
     );
     assert.equal(containerExists, false, "Container was not removed");
+    for (const name of [
+      row.execution.storage.holderName,
+      row.execution.storage.volumeName,
+    ]) {
+      assert.ok(name);
+      const exists = await execFileAsync("docker", [
+        "--host",
+        "unix:///var/run/docker.sock",
+        "inspect",
+        name,
+      ]).then(
+        () => true,
+        () => false,
+      );
+      assert.equal(exists, false, "Storage resource was not removed");
+    }
   }
   process.stdout.write(
     `${JSON.stringify({ schemaVersion: "1", verified: true, output, attempts: results.length, repetitions: report.summary.finished, image: ISOLATION_EXAMPLE_IMAGE })}\n`,

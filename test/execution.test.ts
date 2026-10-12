@@ -61,7 +61,7 @@ describe("execution boundary", () => {
     const args = containerCreateArguments(
       image,
       "agent-eval-test",
-      "/tmp/owned/workspace",
+      "agent-eval-test-workspace",
       1001,
       1001,
     );
@@ -90,14 +90,18 @@ describe("execution boundary", () => {
         "none",
       ]),
     );
-    expect(args.filter((arg) => arg.startsWith("type=bind"))).toEqual([
-      "type=bind,source=/tmp/owned/workspace,target=/workspace,bind-propagation=rprivate",
+    expect(args.filter((arg) => arg.startsWith("type=volume"))).toEqual([
+      "type=volume,source=agent-eval-test-workspace,target=/workspace,volume-nocopy",
     ]);
+    expect(args.some((arg) => arg.startsWith("type=bind"))).toBe(false);
+    expect(args).toContain(
+      "/tmp:rw,noexec,nosuid,nodev,size=67108864,nr_inodes=4096,mode=1777",
+    );
     expect(args).not.toContain("--privileged");
     expect(args.join(" ")).not.toContain("docker.sock");
     expect(() =>
       containerCreateArguments(image, "test", "/tmp/path,extra", 1001, 1001),
-    ).toThrow("comma");
+    ).toThrow("volume name");
     expect(() =>
       containerCreateArguments(image, "test", "/tmp/path", 0, 0),
     ).toThrow("non-root");
@@ -106,7 +110,13 @@ describe("execution boundary", () => {
   it("refuses daemon-resolved settings that weaken the fixed policy", () => {
     const resolved = {
       Image: "sha256:resolved",
-      Config: { User: "1001:1001" },
+      Config: {
+        User: "1001:1001",
+        Labels: { "agent-eval-runner": "agent-eval-test-workspace" },
+        Entrypoint: ["/usr/local/bin/node"],
+        Cmd: ["-e", "setInterval(() => {}, 1000)"],
+        Healthcheck: { Test: ["NONE"] },
+      },
       HostConfig: {
         NetworkMode: "none",
         ReadonlyRootfs: true,
@@ -120,23 +130,37 @@ describe("execution boundary", () => {
         PidMode: "",
         IpcMode: "private",
         Init: true,
+        LogConfig: { Type: "none" },
+        RestartPolicy: { Name: "no" },
+        Mounts: [
+          {
+            Type: "volume",
+            Source: "agent-eval-test-workspace",
+            Target: "/workspace",
+            ReadOnly: false,
+            VolumeOptions: { NoCopy: true },
+          },
+        ],
         Binds: null,
-        Tmpfs: { "/tmp": "rw,noexec,nosuid,nodev,size=67108864,mode=1777" },
+        Tmpfs: {
+          "/tmp":
+            "rw,noexec,nosuid,nodev,size=67108864,nr_inodes=4096,mode=1777",
+        },
       },
       Mounts: [
         {
-          Type: "bind",
-          Source: "/tmp/owned/workspace",
+          Type: "volume",
+          Name: "agent-eval-test-workspace",
+          Driver: "local",
           Destination: "/workspace",
           RW: true,
-          Propagation: "rprivate",
         },
       ],
     };
     const verify = (value: unknown) => {
       assertContainerPolicy(
         value,
-        "/tmp/owned/workspace",
+        "agent-eval-test-workspace",
         1001,
         1001,
         resolved.Image,
@@ -145,8 +169,53 @@ describe("execution boundary", () => {
     expect(() => {
       verify(resolved);
     }).not.toThrow();
+    expect(() => {
+      verify({
+        ...resolved,
+        HostConfig: {
+          ...resolved.HostConfig,
+          Mounts: resolved.HostConfig.Mounts.map((mount) => ({
+            Type: mount.Type,
+            Source: mount.Source,
+            Target: mount.Target,
+            VolumeOptions: mount.VolumeOptions,
+          })),
+        },
+      });
+    }).not.toThrow();
+    expect(() => {
+      assertContainerPolicy(
+        resolved,
+        "agent-eval-test-workspace",
+        1001,
+        1001,
+        resolved.Image,
+        true,
+      );
+    }).toThrow("fixed execution policy");
+    expect(() => {
+      assertContainerPolicy(
+        {
+          ...resolved,
+          HostConfig: {
+            ...resolved.HostConfig,
+            Mounts: resolved.HostConfig.Mounts.map((mount) => ({
+              ...mount,
+              ReadOnly: true,
+            })),
+          },
+          Mounts: resolved.Mounts.map((mount) => ({ ...mount, RW: false })),
+        },
+        "agent-eval-test-workspace",
+        1001,
+        1001,
+        resolved.Image,
+        true,
+      );
+    }).not.toThrow();
     for (const weakened of [
       { ...resolved, Config: { User: "0:0" } },
+      { ...resolved, Config: { ...resolved.Config, Labels: {} } },
       { ...resolved, Image: "another-image" },
       {
         ...resolved,
@@ -161,6 +230,16 @@ describe("execution boundary", () => {
         { Memory: 0 },
         { PidsLimit: 0 },
         { Binds: ["/:/host"] },
+        { LogConfig: { Type: "json-file" } },
+        { RestartPolicy: { Name: "always" } },
+        {
+          Mounts: [
+            {
+              ...resolved.HostConfig.Mounts[0],
+              VolumeOptions: { NoCopy: false },
+            },
+          ],
+        },
       ].map((override) => ({
         ...resolved,
         HostConfig: { ...resolved.HostConfig, ...override },

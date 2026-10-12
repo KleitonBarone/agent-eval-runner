@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   check:
+    timeout-minutes: 15
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest]
@@ -31,6 +32,6 @@ jobs:
       - name: Prepare trusted, digest-pinned isolation image
         if: runner.os == 'Linux'
         run: docker pull node@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e
-      - name: Verify restricted Linux execution
+      - name: Verify Linux containment and live storage exhaustion
         if: runner.os == 'Linux'
         run: pnpm example:isolated

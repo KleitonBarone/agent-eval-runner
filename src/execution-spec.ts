@@ -24,6 +24,11 @@ export const CONTAINER_POLICY = {
   cpus: 1,
   pids: 128,
   temporaryBytes: 64 * 1024 * 1024,
+  temporaryInodes: 4096,
+  workspaceStorage: "local_tmpfs_volume",
+  workspaceBytes: 128 * 1024 * 1024,
+  workspaceInodes: 12000,
+  storageLifecycle: "read_only_holder",
   sourceMetadata: false,
   hostCredentials: false,
   dockerSocket: false,
@@ -44,7 +49,7 @@ export const ExecutionEvidenceSchema = Type.Union([
   Type.Object(
     {
       kind: Type.Literal("docker"),
-      policyVersion: Type.Literal("linux-container-v1"),
+      policyVersion: Type.Literal("linux-container-v2"),
       requestedImage: Type.String(),
       imageId: NullableString,
       architecture: NullableString,
@@ -61,6 +66,22 @@ export const ExecutionEvidenceSchema = Type.Union([
         Type.Literal("failed"),
       ]),
       workspacePath: NullableString,
+      storage: Type.Object(
+        {
+          volumeName: NullableString,
+          holderName: NullableString,
+          holderId: NullableString,
+          verified: Type.Boolean(),
+          cleanup: Type.Union([
+            Type.Literal("not_created"),
+            Type.Literal("pending"),
+            Type.Literal("removed"),
+            Type.Literal("retained"),
+            Type.Literal("failed"),
+          ]),
+        },
+        { additionalProperties: false },
+      ),
       policy: Type.Object(
         {
           network: Type.Literal(CONTAINER_POLICY.network),
@@ -71,6 +92,11 @@ export const ExecutionEvidenceSchema = Type.Union([
           cpus: Type.Literal(CONTAINER_POLICY.cpus),
           pids: Type.Literal(CONTAINER_POLICY.pids),
           temporaryBytes: Type.Literal(CONTAINER_POLICY.temporaryBytes),
+          temporaryInodes: Type.Literal(CONTAINER_POLICY.temporaryInodes),
+          workspaceStorage: Type.Literal(CONTAINER_POLICY.workspaceStorage),
+          workspaceBytes: Type.Literal(CONTAINER_POLICY.workspaceBytes),
+          workspaceInodes: Type.Literal(CONTAINER_POLICY.workspaceInodes),
+          storageLifecycle: Type.Literal(CONTAINER_POLICY.storageLifecycle),
           sourceMetadata: Type.Literal(CONTAINER_POLICY.sourceMetadata),
           hostCredentials: Type.Literal(CONTAINER_POLICY.hostCredentials),
           dockerSocket: Type.Literal(CONTAINER_POLICY.dockerSocket),
@@ -89,7 +115,7 @@ export function executionIdentity(config: ExecutionConfig | undefined) {
   return config?.kind === "docker"
     ? {
         ...config,
-        policyVersion: "linux-container-v1",
+        policyVersion: "linux-container-v2",
         policy: CONTAINER_POLICY,
       }
     : { kind: "local", policyVersion: "trusted-worktree-v1" };
@@ -102,7 +128,7 @@ export function initialExecutionEvidence(
     return { kind: "local", policyVersion: "trusted-worktree-v1" };
   return {
     kind: "docker",
-    policyVersion: "linux-container-v1",
+    policyVersion: "linux-container-v2",
     requestedImage: config.image,
     imageId: null,
     architecture: null,
@@ -114,6 +140,13 @@ export function initialExecutionEvidence(
     containerName: null,
     cleanup: "not_created",
     workspacePath: null,
+    storage: {
+      volumeName: null,
+      holderName: null,
+      holderId: null,
+      verified: false,
+      cleanup: "not_created",
+    },
     policy: { ...CONTAINER_POLICY },
   };
 }

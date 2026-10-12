@@ -16,11 +16,26 @@ import {
   type ProcessResult,
 } from "./process.js";
 import type { Redactor } from "./redaction.js";
-import { SafetyDeadline } from "./safety.js";
-import { copyWorkspaceFiles, scanWorkspace } from "./workspace.js";
+import { SAFETY_POLICY, SafetyDeadline } from "./safety.js";
+import {
+  copyWorkspaceFiles,
+  readBoundedFile,
+  scanWorkspace,
+} from "./workspace.js";
+import {
+  assertStorageProbe,
+  assertVolumePolicy,
+  materializeStorageExport,
+  volumeOptions,
+  STORAGE_EXPORT_SCRIPT,
+  STORAGE_IMPORT_SCRIPT,
+  STORAGE_PROBE_SCRIPT,
+  STORAGE_TRANSFER_BYTES,
+} from "./storage.js";
 
 type DockerEvidence = Extract<ExecutionEvidence, { kind: "docker" }>;
 const CONTROL_TIMEOUT_MS = 10_000;
+const KEEPER_SCRIPT = "setInterval(() => {}, 1000)";
 const ImageInspection = Type.Object({
   Id: Type.String({ pattern: "^sha256:[0-9a-f]{64}$" }),
   Os: Type.Literal("linux"),
@@ -35,15 +50,20 @@ const ImageInspection = Type.Object({
 // Validate daemon-resolved settings before starting any task action.
 export function assertContainerPolicy(
   input: unknown,
-  workspace: string,
+  volume: string,
   uid: number,
   gid: number,
   imageId: string,
+  readOnly = false,
 ): void {
   const schema = Type.Object({
     Image: Type.Literal(imageId),
     Config: Type.Object({
       User: Type.Literal(`${String(uid)}:${String(gid)}`),
+      Labels: Type.Object({ "agent-eval-runner": Type.Literal(volume) }),
+      Entrypoint: Type.Tuple([Type.Literal("/usr/local/bin/node")]),
+      Cmd: Type.Tuple([Type.Literal("-e"), Type.Literal(KEEPER_SCRIPT)]),
+      Healthcheck: Type.Object({ Test: Type.Tuple([Type.Literal("NONE")]) }),
     }),
     HostConfig: Type.Object({
       NetworkMode: Type.Literal("none"),
@@ -61,6 +81,20 @@ export function assertContainerPolicy(
       PidMode: Type.Literal(""),
       IpcMode: Type.Literal("private"),
       Init: Type.Literal(true),
+      LogConfig: Type.Object({ Type: Type.Literal("none") }),
+      RestartPolicy: Type.Object({ Name: Type.Literal("no") }),
+      Mounts: Type.Array(
+        Type.Object({
+          Type: Type.Literal("volume"),
+          Source: Type.Literal(volume),
+          Target: Type.Literal("/workspace"),
+          ReadOnly: readOnly
+            ? Type.Literal(true)
+            : Type.Optional(Type.Literal(false)),
+          VolumeOptions: Type.Object({ NoCopy: Type.Literal(true) }),
+        }),
+        { minItems: 1, maxItems: 1 },
+      ),
       Binds: Type.Union([
         Type.Null(),
         Type.Array(Type.String(), { maxItems: 0 }),
@@ -68,7 +102,7 @@ export function assertContainerPolicy(
       Tmpfs: Type.Object(
         {
           "/tmp": Type.Literal(
-            `rw,noexec,nosuid,nodev,size=${String(CONTAINER_POLICY.temporaryBytes)},mode=1777`,
+            `rw,noexec,nosuid,nodev,size=${String(CONTAINER_POLICY.temporaryBytes)},nr_inodes=${String(CONTAINER_POLICY.temporaryInodes)},mode=1777`,
           ),
         },
         { additionalProperties: false },
@@ -76,39 +110,45 @@ export function assertContainerPolicy(
     }),
     Mounts: Type.Array(
       Type.Object({
-        Type: Type.Literal("bind"),
-        Source: Type.Literal(workspace),
+        Type: Type.Literal("volume"),
+        Name: Type.Literal(volume),
+        Driver: Type.Literal("local"),
         Destination: Type.Literal("/workspace"),
-        RW: Type.Literal(true),
-        Propagation: Type.Literal("rprivate"),
+        RW: Type.Literal(!readOnly),
       }),
       { minItems: 1, maxItems: 1 },
     ),
   });
   if (!Value.Check(schema, input))
     throw new Error(
-      "Docker resolved settings do not match the fixed execution policy",
+      `Docker resolved settings do not match the fixed execution policy: ${[
+        ...Value.Errors(schema, input),
+      ]
+        .slice(0, 5)
+        .map(({ path, message }) => `${path}: ${message}`)
+        .join("; ")}`,
     );
 }
 
-// No arbitrary Docker options come from a task. Only this copied directory is mounted.
+// Only a runner-owned quota volume is mounted. The holder never runs task code.
 export function containerCreateArguments(
   image: string,
   name: string,
-  workspace: string,
+  volume: string,
   uid: number,
   gid: number,
+  readOnly = false,
 ): string[] {
   if (uid <= 0 || !Number.isInteger(uid) || gid < 0 || !Number.isInteger(gid))
     throw new Error("Container execution requires a non-root Linux user");
-  if (workspace.includes(","))
-    throw new Error("Docker mount path contains a comma");
+  if (!/^agent-eval-[a-zA-Z0-9-]+$/u.test(volume))
+    throw new Error("Invalid owned Docker volume name");
   return [
     "create",
     "--name",
     name,
     "--label",
-    "agent-eval-runner=true",
+    `agent-eval-runner=${volume}`,
     "--pull",
     "never",
     "--network",
@@ -135,16 +175,16 @@ export function containerCreateArguments(
     "--log-driver",
     "none",
     "--tmpfs",
-    `/tmp:rw,noexec,nosuid,nodev,size=${String(CONTAINER_POLICY.temporaryBytes)},mode=1777`,
+    `/tmp:rw,noexec,nosuid,nodev,size=${String(CONTAINER_POLICY.temporaryBytes)},nr_inodes=${String(CONTAINER_POLICY.temporaryInodes)},mode=1777`,
     "--mount",
-    `type=bind,source=${workspace},target=/workspace,bind-propagation=rprivate`,
+    `type=volume,source=${volume},target=/workspace,volume-nocopy${readOnly ? ",readonly" : ""}`,
     "--workdir",
     "/workspace",
     "--entrypoint",
     "/usr/local/bin/node",
     image,
     "-e",
-    "setInterval(() => {}, 1000)",
+    KEEPER_SCRIPT,
   ];
 }
 
@@ -165,7 +205,14 @@ export class DockerExecution implements ExecutionBackend {
   #root: string | undefined;
   #workspace: string | undefined;
   readonly #name = `agent-eval-${randomUUID()}`;
+  readonly #volume = `${this.#name}-workspace`;
+  readonly #holder = `${this.#name}-holder`;
   #created = false;
+  #volumeCreated = false;
+  #holderCreated = false;
+  #holderStartedAt: string | undefined;
+  #prepared = false;
+  #exportComplete = false;
   #quiescent = true;
 
   get workspace(): string {
@@ -185,6 +232,7 @@ export class DockerExecution implements ExecutionBackend {
   async #docker(
     args: readonly string[],
     request?: Partial<ProcessRequest>,
+    redact = this.redact,
   ): Promise<ProcessResult> {
     if (this.#root === undefined)
       throw new Error("Docker control directory is missing");
@@ -204,7 +252,7 @@ export class DockerExecution implements ExecutionBackend {
         maxOutputBytes: 256 * 1024,
         ...request,
       },
-      this.redact,
+      redact,
     );
   }
 
@@ -222,7 +270,9 @@ export class DockerExecution implements ExecutionBackend {
     if (
       result.exitCode !== 0 ||
       result.termination !== null ||
-      result.error !== null
+      result.error !== null ||
+      result.stdoutTruncated ||
+      result.stderrTruncated
     )
       throw new Error(
         `Docker ${args[0] ?? "control"} failed: ${result.error ?? (result.stderr.length > 0 ? result.stderr : (result.termination ?? String(result.exitCode)))}`,
@@ -246,15 +296,10 @@ export class DockerExecution implements ExecutionBackend {
     await mkdir(join(this.#root, "docker-config"));
     this.#workspace = join(this.#root, "workspace");
     this.evidence.workspacePath = this.#workspace;
+    await mkdir(this.#workspace);
     const files = await scanWorkspace(this.checkout.path, deadline, {
       skipRootGit: true,
     });
-    await copyWorkspaceFiles(
-      this.checkout.path,
-      this.#workspace,
-      files,
-      deadline,
-    );
     const input: unknown = JSON.parse(
       await this.#control(
         ["image", "inspect", "--format", "{{json .}}", this.image],
@@ -280,18 +325,82 @@ export class DockerExecution implements ExecutionBackend {
       signal,
       deadline,
     );
+    // Creating an existing volume is not exclusive. Refuse it before creation,
+    // then verify ownership/options before mounting or removing it.
+    const existing = await this.#docker(["volume", "inspect", this.#volume]);
+    if (existing.exitCode === 0)
+      throw new Error("Owned storage name already exists");
+    this.evidence.storage.volumeName = this.#volume;
+    this.evidence.storage.holderName = this.#holder;
+    this.evidence.storage.cleanup = "pending";
+    this.#volumeCreated = true;
+    await this.#control(
+      [
+        "volume",
+        "create",
+        "--driver",
+        "local",
+        "--label",
+        `agent-eval-runner=${this.#volume}`,
+        "--opt",
+        "type=tmpfs",
+        "--opt",
+        "device=tmpfs",
+        "--opt",
+        `o=${volumeOptions(uid, gid)}`,
+        this.#volume,
+      ],
+      signal,
+      deadline,
+    );
+    await this.#verifyVolume(deadline);
+    this.#holderCreated = true;
+    const holderId = await this.#control(
+      containerCreateArguments(
+        this.image,
+        this.#holder,
+        this.#volume,
+        uid,
+        gid,
+        true,
+      ),
+      signal,
+      deadline,
+    );
+    if (!/^[0-9a-f]{64}$/u.test(holderId))
+      throw new Error("Docker returned an invalid holder ID");
+    this.evidence.storage.holderId = holderId;
+    const holder: unknown = JSON.parse(
+      await this.#control(
+        ["inspect", "--format", "{{json .}}", this.#holder],
+        signal,
+        deadline,
+      ),
+    );
+    assertContainerPolicy(holder, this.#volume, uid, gid, input.Id, true);
+    await this.#control(["start", this.#holder], signal, deadline);
+    this.#holderStartedAt = await this.#control(
+      ["inspect", "--format", "{{.State.StartedAt}}", this.#holder],
+      signal,
+      deadline,
+    );
+    await this.#control(
+      [
+        "exec",
+        this.#holder,
+        "/usr/local/bin/node",
+        "-e",
+        "require('node:assert/strict').throws(()=>require('node:fs').writeFileSync('/workspace/.holder-write-probe','x'),{code:'EROFS'})",
+      ],
+      signal,
+      deadline,
+    );
     this.evidence.containerName = this.#name;
     // Mark the generated name before create, so ambiguous create failures can be cleaned up.
     this.#created = true;
     this.evidence.cleanup = "pending";
     const id = await this.#control(
-      containerCreateArguments(
-        this.image,
-        this.#name,
-        this.#workspace,
-        uid,
-        gid,
-      ),
+      containerCreateArguments(this.image, this.#name, this.#volume, uid, gid),
       signal,
       deadline,
     );
@@ -305,7 +414,7 @@ export class DockerExecution implements ExecutionBackend {
         deadline,
       ),
     );
-    assertContainerPolicy(container, this.#workspace, uid, gid, input.Id);
+    assertContainerPolicy(container, this.#volume, uid, gid, input.Id);
     const runtime = await this.execute({
       command: "/usr/local/bin/node",
       args: ["-p", "process.version"],
@@ -328,6 +437,107 @@ export class DockerExecution implements ExecutionBackend {
         "Container image must provide Node.js 22 or newer at /usr/local/bin/node",
       );
     this.evidence.node = node;
+    const probe = await this.execute({
+      command: "/usr/local/bin/node",
+      args: ["-e", STORAGE_PROBE_SCRIPT],
+      cwd: this.checkout.path,
+      timeoutMs: deadline.remainingMs(),
+      timeoutTermination: "check_timeout",
+      maxOutputBytes: 4096,
+      ...(signal === undefined ? {} : { signal }),
+    });
+    if (
+      probe.exitCode !== 0 ||
+      probe.termination !== null ||
+      probe.error !== null ||
+      probe.stdoutTruncated
+    )
+      throw new Error(
+        `Storage verification failed: ${probe.error ?? probe.stderr}`,
+      );
+    const mounted: unknown = JSON.parse(probe.stdout);
+    assertStorageProbe(mounted);
+    this.evidence.storage.verified = true;
+    const imported = [];
+    let importBytes = 0;
+    for (const file of files) {
+      const content = await readBoundedFile(
+        this.checkout.path,
+        file.path,
+        Math.min(
+          SAFETY_POLICY.fileBytes,
+          SAFETY_POLICY.workspaceBytes - importBytes,
+        ),
+        deadline,
+      );
+      importBytes += content.length;
+      imported.push({
+        path: file.path,
+        mode: file.mode,
+        contentBase64: content.toString("base64"),
+      });
+    }
+    const importInput = JSON.stringify(imported);
+    if (Buffer.byteLength(importInput) > STORAGE_TRANSFER_BYTES)
+      throw new Error("Workspace import transport limit exceeded");
+    const importedResult = await this.execute({
+      command: "/usr/local/bin/node",
+      args: ["-e", STORAGE_IMPORT_SCRIPT],
+      input: importInput,
+      cwd: this.checkout.path,
+      timeoutMs: deadline.remainingMs(),
+      timeoutTermination: "check_timeout",
+      maxOutputBytes: 4096,
+      ...(signal === undefined ? {} : { signal }),
+    });
+    if (
+      importedResult.exitCode !== 0 ||
+      importedResult.termination !== null ||
+      importedResult.error !== null
+    )
+      throw new Error(
+        `Quota workspace import failed: ${importedResult.error ?? importedResult.stderr}`,
+      );
+    this.#prepared = true;
+  }
+
+  async #verifyVolume(deadline?: SafetyDeadline): Promise<void> {
+    const input: unknown = JSON.parse(
+      await this.#control(
+        ["volume", "inspect", "--format", "{{json .}}", this.#volume],
+        deadline?.signal,
+        deadline,
+      ),
+    );
+    assertVolumePolicy(
+      input,
+      this.#volume,
+      this.evidence.uid ?? -1,
+      this.evidence.gid ?? -1,
+    );
+  }
+
+  async #removeOwnedContainer(name: string, id: string | null): Promise<void> {
+    const input: unknown = JSON.parse(
+      await this.#control(["inspect", "--format", "{{json .}}", name]),
+    );
+    const ownership = Type.Object({
+      Name: Type.Literal(`/${name}`),
+      Id:
+        id === null
+          ? Type.String({ pattern: "^[0-9a-f]{64}$" })
+          : Type.Literal(id),
+      Config: Type.Object({
+        Labels: Type.Object({
+          "agent-eval-runner": Type.Literal(this.#volume),
+        }),
+      }),
+    });
+    if (!Value.Check(ownership, input))
+      throw new Error(
+        "Refusing to remove a container without matching ownership",
+      );
+    await this.#control(["rm", "--force", name]);
   }
 
   async execute(request: ProcessRequest): Promise<ProcessResult> {
@@ -349,10 +559,46 @@ export class DockerExecution implements ExecutionBackend {
       termination: null,
       error: null,
     };
+    const holder = await this.#docker(
+      [
+        "inspect",
+        "--format",
+        "{{.State.StartedAt}} {{.State.Running}}",
+        this.#holder,
+      ],
+      {
+        timeoutMs: Math.min(CONTROL_TIMEOUT_MS, request.timeoutMs),
+        timeoutTermination: request.timeoutTermination,
+        ...(request.signal === undefined ? {} : { signal: request.signal }),
+      },
+    );
+    if (
+      holder.exitCode !== 0 ||
+      holder.error !== null ||
+      holder.termination !== null ||
+      holder.stdout.trim() !== `${this.#holderStartedAt ?? "missing"} true`
+    ) {
+      result = {
+        ...holder,
+        error:
+          holder.error ??
+          "Storage holder is unavailable; refusing a potentially reset workspace",
+      };
+      return {
+        ...result,
+        command: this.redact(request.command),
+        args: request.args.map(this.redact),
+        cwd: this.redact(request.cwd),
+        durationMs: Math.round((performance.now() - startedAt) * 1000) / 1000,
+      };
+    }
     this.#quiescent = false;
     try {
       const started = await this.#docker(["start", this.#name], {
-        timeoutMs: request.timeoutMs,
+        timeoutMs: Math.max(
+          1,
+          Math.floor(request.timeoutMs - (performance.now() - startedAt)),
+        ),
         timeoutTermination: request.timeoutTermination,
         ...(request.signal === undefined ? {} : { signal: request.signal }),
       });
@@ -487,8 +733,57 @@ export class DockerExecution implements ExecutionBackend {
       throw new Error(
         "Cannot capture a workspace with running container processes",
       );
-    // The container is stopped before traversal. Reject links and special files.
+    const holderState = await this.#control(
+      [
+        "inspect",
+        "--format",
+        "{{.State.StartedAt}} {{.State.Running}}",
+        this.#holder,
+      ],
+      undefined,
+      deadline,
+    );
+    if (holderState !== `${this.#holderStartedAt ?? "missing"} true`)
+      throw new Error(
+        "Storage holder stopped or restarted; refusing potentially reset evidence",
+      );
+    // Use the read-only holder. Never restart agent processes or unpack a tar export.
+    const exported = await this.#docker(
+      [
+        "exec",
+        this.#holder,
+        "/usr/local/bin/node",
+        "-e",
+        STORAGE_EXPORT_SCRIPT,
+        JSON.stringify(["/workspace", SAFETY_POLICY]),
+      ],
+      {
+        timeoutMs: deadline.remainingMs(),
+        maxOutputBytes: STORAGE_TRANSFER_BYTES,
+      },
+      (value) => value,
+    );
+    if (
+      exported.exitCode !== 0 ||
+      exported.termination !== null ||
+      exported.error !== null ||
+      exported.stdoutTruncated
+    )
+      throw new Error(
+        `Bounded workspace export failed: ${this.redact(exported.error ?? exported.stderr)}`,
+      );
+    const output: unknown = JSON.parse(exported.stdout);
+    const exportErrors = await materializeStorageExport(
+      output,
+      this.#workspace,
+      deadline,
+    );
+    if (exportErrors.length > 0)
+      throw new Error(
+        `Incomplete workspace export: ${exportErrors.join("; ")}`,
+      );
     const files = await scanWorkspace(this.#workspace, deadline);
+    this.#exportComplete = true;
     await assertCheckoutRoot(this.checkout);
     for (const entry of await readdir(this.checkout.path)) {
       if (entry !== ".git")
@@ -506,21 +801,49 @@ export class DockerExecution implements ExecutionBackend {
   }
 
   async dispose(): Promise<void> {
-    if (!this.#created) return;
     try {
-      await this.#control(["rm", "--force", this.#name]);
-      this.#created = false;
-      this.#quiescent = true;
-      this.evidence.cleanup = "removed";
+      if (this.#created) {
+        await this.#removeOwnedContainer(this.#name, this.evidence.containerId);
+        this.#created = false;
+        this.#quiescent = true;
+        this.evidence.cleanup = "removed";
+      }
     } catch (error) {
       this.evidence.cleanup = "failed";
+      this.evidence.storage.cleanup = "failed";
+      throw error;
+    }
+    if (this.#prepared && !this.#exportComplete) {
+      this.evidence.storage.cleanup = "retained";
+      return;
+    }
+    try {
+      if (this.#holderCreated) {
+        await this.#removeOwnedContainer(
+          this.#holder,
+          this.evidence.storage.holderId,
+        );
+        this.#holderCreated = false;
+      }
+      if (this.#volumeCreated) {
+        await this.#verifyVolume();
+        await this.#control(["volume", "rm", this.#volume]);
+        this.#volumeCreated = false;
+        this.evidence.storage.cleanup = "removed";
+      }
+    } catch (error) {
+      this.evidence.storage.cleanup = "failed";
       throw error;
     }
   }
 
   async removeWorkspace(): Promise<void> {
     if (this.#root === undefined) return;
-    if (this.evidence.cleanup === "failed")
+    if (
+      this.evidence.cleanup === "failed" ||
+      this.evidence.storage.cleanup === "failed" ||
+      this.evidence.storage.cleanup === "retained"
+    )
       throw new Error("Retaining workspace because container cleanup failed");
     await assertDisposable(this.#root, "agent-eval-isolated-");
     await rm(this.#root, { recursive: true, force: true });

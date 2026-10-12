@@ -86,8 +86,10 @@ export async function runProcess(
   redact: Redactor,
 ): Promise<ProcessResult> {
   const startedAt = performance.now();
-  let stdout: Buffer = Buffer.alloc(0);
-  let stderr: Buffer = Buffer.alloc(0);
+  const stdout: Buffer[] = [];
+  const stderr: Buffer[] = [];
+  let stdoutBytes = 0;
+  let stderrBytes = 0;
   let stdoutTruncated = false;
   let stderrTruncated = false;
   let termination: ProcessTermination | null = null;
@@ -102,26 +104,29 @@ export async function runProcess(
   });
 
   const append = (
-    current: Buffer,
+    current: Buffer[],
+    bytes: number,
     chunk: Buffer,
     markTruncated: () => void,
-  ): Buffer => {
-    const remaining = request.maxOutputBytes - current.byteLength;
+  ): number => {
+    const remaining = request.maxOutputBytes - bytes;
     if (remaining <= 0) {
       markTruncated();
-      return current;
+      return bytes;
     }
     if (chunk.byteLength > remaining) markTruncated();
-    return Buffer.concat([current, chunk.subarray(0, remaining)]);
+    const accepted = chunk.subarray(0, remaining);
+    current.push(accepted);
+    return bytes + accepted.length;
   };
 
   child.stdout.on("data", (chunk: Buffer) => {
-    stdout = append(stdout, chunk, () => {
+    stdoutBytes = append(stdout, stdoutBytes, chunk, () => {
       stdoutTruncated = true;
     });
   });
   child.stderr.on("data", (chunk: Buffer) => {
-    stderr = append(stderr, chunk, () => {
+    stderrBytes = append(stderr, stderrBytes, chunk, () => {
       stderrTruncated = true;
     });
   });
@@ -165,8 +170,8 @@ export async function runProcess(
     cwd: request.cwd,
     exitCode: closed.code,
     signal: closed.signal,
-    stdout: redact(stdout.toString("utf8")),
-    stderr: redact(stderr.toString("utf8")),
+    stdout: redact(Buffer.concat(stdout, stdoutBytes).toString("utf8")),
+    stderr: redact(Buffer.concat(stderr, stderrBytes).toString("utf8")),
     stdoutTruncated,
     stderrTruncated,
     durationMs: Math.round((performance.now() - startedAt) * 1_000) / 1_000,

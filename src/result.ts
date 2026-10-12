@@ -72,7 +72,7 @@ export const CheckResultSchema = Type.Union([
 export const ResultSpecSchema = Type.Object(
   {
     $schema: Type.Optional(Type.String()),
-    schemaVersion: Type.Literal("4"),
+    schemaVersion: Type.Literal("5"),
     safety: SafetyPolicySchema,
     execution: ExecutionEvidenceSchema,
     runner: Type.Object(
@@ -176,7 +176,7 @@ export const ResultSpecSchema = Type.Object(
     ),
   },
   {
-    $id: "https://agent-eval-runner.dev/schemas/result-v4.schema.json",
+    $id: "https://agent-eval-runner.dev/schemas/result-v5.schema.json",
     additionalProperties: false,
   },
 );
@@ -199,10 +199,10 @@ export function parseResultSpec(input: unknown): ResultSpec {
     typeof input === "object" &&
     input !== null &&
     "schemaVersion" in input &&
-    input.schemaVersion !== "4"
+    input.schemaVersion !== "5"
   ) {
     throw new Error(
-      "Unsupported result version. Comparisons require result version 4.",
+      "Unsupported result version. Comparisons require result version 5.",
     );
   }
   assertResultSpec(input);

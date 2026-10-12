@@ -110,13 +110,16 @@ describe("saved-result comparisons", () => {
       }),
     ).toThrow("Execution identity");
     expect(() => parseResultSpec({ ...result, schemaVersion: "1" })).toThrow(
-      "require result version 4",
+      "require result version 5",
     );
     expect(() => parseResultSpec({ ...result, schemaVersion: "2" })).toThrow(
-      "require result version 4",
+      "require result version 5",
     );
     expect(() => parseResultSpec({ ...result, schemaVersion: "3" })).toThrow(
-      "require result version 4",
+      "require result version 5",
+    );
+    expect(() => parseResultSpec({ ...result, schemaVersion: "4" })).toThrow(
+      "require result version 5",
     );
     expect(() =>
       parseResultSpec({
@@ -144,7 +147,16 @@ describe("saved-result comparisons", () => {
     const second = {
       ...isolated,
       attempt: { ...result.attempt, id: "second", repetition: 2 },
-      execution: { ...execution, containerId: "different-id" },
+      execution: {
+        ...execution,
+        containerId: "different-id",
+        storage: {
+          ...execution.storage,
+          volumeName: "different-volume",
+          holderName: "different-holder",
+          holderId: "different-holder-id",
+        },
+      },
     } satisfies ResultSpec;
     const repeated = {
       ...index,

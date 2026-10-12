@@ -171,7 +171,7 @@ export function createComparison(
       `Batch state is ${index.state}; some attempts may be unfinished.`,
     );
   const report: ComparisonSpec = {
-    schemaVersion: "3",
+    schemaVersion: "4",
     batchId: index.id,
     comparisonSha256: index.comparisonSha256,
     scoringVersion: "2",

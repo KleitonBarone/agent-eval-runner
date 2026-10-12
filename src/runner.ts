@@ -429,13 +429,13 @@ export async function runEvaluation(
       ? "succeeded"
       : "failed";
   const result: ResultSpec = {
-    $schema: "https://agent-eval-runner.dev/schemas/result-v4.schema.json",
-    schemaVersion: "4",
+    $schema: "https://agent-eval-runner.dev/schemas/result-v5.schema.json",
+    schemaVersion: "5",
     safety: { ...SAFETY_POLICY },
     execution,
     runner: {
       name: "agent-eval-runner",
-      version: "0.4.0",
+      version: "0.5.0",
       node: process.version,
       platform: process.platform,
       arch: process.arch,

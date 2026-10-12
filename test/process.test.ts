@@ -37,3 +37,27 @@ it("captures and redacts output from piped input", async () => {
   expect(result.exitCode).toBe(0);
   expect(result.stdout).toBe("API_KEY=[REDACTED]\n");
 });
+
+it("caps each stream across many chunks without changing exit evidence", async () => {
+  const limit = 65539;
+  const result = await runProcess(
+    {
+      command: process.execPath,
+      args: [
+        "-e",
+        "for(let i=0;i<8;i++){process.stdout.write(Buffer.alloc(65536,97));process.stderr.write(Buffer.alloc(65536,98));}",
+      ],
+      cwd: process.cwd(),
+      timeoutMs: 3000,
+      timeoutTermination: "check_timeout",
+      maxOutputBytes: limit,
+    },
+    createRedactor([]),
+  );
+  expect(result.exitCode).toBe(0);
+  expect(result.termination).toBeNull();
+  expect(result.stdout).toBe("a".repeat(limit));
+  expect(result.stderr).toBe("b".repeat(limit));
+  expect(result.stdoutTruncated).toBe(true);
+  expect(result.stderrTruncated).toBe(true);
+});
