@@ -37,7 +37,7 @@ export const FinishedComparisonRowSchema = Type.Object(
 
 export const ComparisonSpecSchema = Type.Object(
   {
-    schemaVersion: Type.Literal("4"),
+    schemaVersion: Type.Literal("5"),
     batchId: Type.String(),
     comparisonSha256: DigestSchema,
     scoringVersion: Type.Literal("2"),
@@ -63,7 +63,7 @@ export const ComparisonSpecSchema = Type.Object(
     warnings: Type.Array(Type.String()),
   },
   {
-    $id: "https://agent-eval-runner.dev/schemas/comparison-v4.schema.json",
+    $id: "https://agent-eval-runner.dev/schemas/comparison-v5.schema.json",
     additionalProperties: false,
   },
 );

@@ -4,7 +4,7 @@
 
 Agent Eval Runner measures coding-agent attempts under reproducible conditions. Its output is evidence: inputs, environment identity, commands, patches, checks, resource use, and artifacts.
 
-Read `README.md` and `ROADMAP.md` before changing scope. Milestones 0, 1, and 2 are implemented. Milestone 3 has restricted Linux containers, raw-object checkout, bounded capture, and live Linux workspace quotas for trusted fake-agent fixtures; the milestone itself is not complete. Do not describe later items as complete unless their checkbox and implementation agree.
+Read `README.md` and `ROADMAP.md` before changing scope. Milestones 0, 1, and 2 are implemented. Milestone 3 has restricted Linux containers, contained Git preparation, bounded raw-byte capture, and live Linux workspace quotas for trusted fake-agent fixtures; the milestone itself is not complete. Do not describe later items as complete unless their checkbox and implementation agree.
 
 ## Product rules
 
@@ -18,9 +18,9 @@ Read `README.md` and `ROADMAP.md` before changing scope. Milestones 0, 1, and 2 
 
 ## Runtime and isolation
 
-Use Node.js 22 or newer, pnpm, and strict TypeScript. TypeBox schemas define runtime validation, TypeScript types, and generated JSON Schemas. Do not hand-edit files under `schemas`; change the schema sources (`src/spec.ts`, `src/execution-spec.ts`, `src/safety.ts`, `src/result.ts`, `src/events.ts`, `src/usage.ts`, `src/batch-spec.ts`, `src/comparison-spec.ts`), then run `pnpm schemas:write`. Result v5 and comparison v4 are current. Archived result v1/v2/v3/v4 and comparison v1/v2/v3 must not be regenerated from current sources.
+Use Node.js 22 or newer, pnpm, and strict TypeScript. TypeBox schemas define runtime validation, TypeScript types, and generated JSON Schemas. Do not hand-edit files under `schemas`; change the schema sources (`src/spec.ts`, `src/execution-spec.ts`, `src/preparation-protocol.ts`, `src/safety.ts`, `src/result.ts`, `src/events.ts`, `src/usage.ts`, `src/batch-spec.ts`, `src/comparison-spec.ts`), then run `pnpm schemas:write`. Result v6 and comparison v5 are current; preparation request/response v1 define the internal worker protocol. Archived result v1/v2/v3/v4/v5 and comparison v1/v2/v3/v4 must not be regenerated from current sources.
 
-The local execution boundary is a detached Git worktree in a runner-owned temporary repository. It does not restrict agent/check network or host filesystem access. Host Git still parses source metadata and objects. Do not run paid models, untrusted repositories, or untrusted commands without explicit user authorization and stronger isolation.
+The local execution boundary is a detached Git worktree in a runner-owned temporary repository. It does not restrict agent/check network or host filesystem access. Local runs still use host Git. Docker runs must use the fixed preparer for all Git operations, including revision resolution and patch generation. Do not run paid models, untrusted repositories, or untrusted commands without explicit user authorization and stronger isolation.
 
 Keep preparation and patch generation on raw blobs and private Git metadata. Do not restore ordinary checkout, source worktree registration, inherited Git config/templates, clean/smudge filters, or network/lazy fetch. Reject unsupported tree entries before materialization. Patches include ignored regular files and use a runner-owned index. Preserve raw-byte semantics and Unix/Windows mode handling when changing capture.
 
@@ -29,6 +29,8 @@ Keep preparation and patch generation on raw blobs and private Git metadata. Do 
 For Docker changes, read `docs/isolation.md`. Keep the policy fixed and opt-in. Only preinstalled digest-pinned images and a local Linux engine are supported. Never accept arbitrary Docker flags, mount source `.git` or host credentials, or silently fall back to local execution. Stop the whole attempt container after every command, verify quiescence before capture, and retain exports after failed capture or cleanup. Never prune Docker resources or remove containers/images not owned by the current attempt.
 
 `src/storage.ts` owns fixed tmpfs options, mounted-quota verification, and bounded export validation. Do not restore a writable host bind mount, use ordinary unquotaed volumes, unpack daemon tar exports, or restart a lost storage holder. The read-only holder runs only fixed runner helpers, never task commands. Incomplete export retains the holder/volume and records their identities; removing the last mount destroys tmpfs data. Verify ownership before cleanup, and never remove retained resources automatically.
+
+`src/object-snapshot.ts` copies only bounded opaque loose/pack object files without calling Git. Reject external alternates, linked-worktree metadata, links, and unsupported layouts. Do not copy source config/hooks/refs or mount the source object store directly. `src/git-preparation.ts` passes only the copied read-only snapshot and bundled worker to the preparer; the agent never receives either. Validate protocol, paths, bytes, and digests before accepting files. Stop the preparer after each operation and retain its private quota volume on incomplete capture. Failed preparation retains copied inputs, never falls back to host Git, and never starts an adapter.
 
 ## Keep adapters thin
 
@@ -60,7 +62,9 @@ pnpm example:batch
 
 `pnpm check` verifies formatting, linting, types, generated schemas, and focused tests. Tests cover budgets, descendant process termination, event ordering, artifact/patch capture, scoring, result preservation, basic credential redaction, repetitions, cancellation, persistence failure, usage aggregation, execution policy, and report compatibility/regeneration. Integration tests create trusted local temporary Git repositories and credentials. `pnpm example:batch` needs the built CLI and verifies intentional failures, all saved artifacts, and deterministic regeneration. CI runs both local examples on Linux and Windows without uploading results.
 
-On a non-root Linux runner with a trusted Docker Engine and the preinstalled image documented in README, also run `pnpm example:isolated` after building the CLI. Linux CI runs it; Windows tests verify unsupported execution does not fall back to the host. Native Windows cannot validate live Linux containment. Do not claim it passed without actually running the Linux acceptance path.
+`pnpm build` also bundles the preparation worker with esbuild. Docker APIs/examples require this asset. Never replace it with runtime package installation or repository scripts. Keep the worker byte digest in results and identical worker bytes for the compiled Linux acceptance helper. Linux acceptance must block host Git during packed checkout/patch generation, replay binary patches, and preserve rejected/malformed-source attempts. Snapshot/protocol tests must cover limits, cancellation, altered bytes, and path escapes.
+
+On a non-root Linux runner with a trusted Docker Engine and both preinstalled images documented in README, also run `pnpm example:isolated` after building the CLI. Linux CI runs it; Windows tests verify unsupported execution does not fall back to the host. Native Windows cannot validate live Linux containment. Do not claim it passed without actually running the Linux acceptance path.
 
 Add focused tests for budget enforcement, adapter normalization, event ordering, redaction, process termination, artifact capture, and scoring changes. Git/workspace/storage tests also cover filter/hook/config rejection, raw binary patch replay, unsupported entries, bounded reads/traversal, aggregate artifacts, quota-policy rejection, and oversized patch/export retention. Linux acceptance must reach actual `ENOSPC` for workspace and temporary bytes/inodes, verify evidence/check continuation, and verify successful resource cleanup. Test cleanup must resolve and remove only private directories associated with its trusted source fixture. Do not add placeholder scripts that always pass.
 

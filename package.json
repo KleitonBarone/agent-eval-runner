@@ -1,6 +1,6 @@
 {
   "name": "agent-eval-runner",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
   "description": "Run reproducible local coding-agent evaluations and preserve their evidence.",
   "type": "module",
@@ -11,7 +11,7 @@
     ".": "./dist/index.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && tsx scripts/build-preparation-worker.ts",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm schemas:check && pnpm test",
     "example": "tsx scripts/run-example.ts",
     "example:batch": "tsx scripts/run-batch-example.ts",
@@ -34,6 +34,7 @@
   "devDependencies": {
     "@eslint/js": "^9.34.0",
     "@types/node": "^24.3.0",
+    "esbuild": "0.28.2",
     "eslint": "^9.34.0",
     "prettier": "^3.6.2",
     "tsx": "^4.20.5",

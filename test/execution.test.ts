@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as hostGit from "../src/git.js";
 
 import {
   assertContainerPolicy,
@@ -15,8 +16,26 @@ import {
 
 const image = `node@sha256:${"a".repeat(64)}`;
 afterEach(cleanupTestRepositories);
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("execution boundary", () => {
+  it.runIf(process.platform !== "linux")(
+    "never invokes host Git for a Docker checkout",
+    async () => {
+      const repository = await createTestRepository();
+      const prepare = vi.spyOn(hostGit, "prepareCheckout");
+      await runEvaluation(
+        parseTaskSpec({
+          ...batchFor(repository).task,
+          execution: { kind: "docker", image },
+          adapter: { kind: "fake", actions: [] },
+        }),
+      );
+      expect(prepare).not.toHaveBeenCalled();
+    },
+  );
   it("requires digest-pinned images and rejects arbitrary runtime options", () => {
     const task = {
       ...batchFor({ path: process.cwd(), revision: "a".repeat(40) }).task,
@@ -94,6 +113,33 @@ describe("execution boundary", () => {
       "type=volume,source=agent-eval-test-workspace,target=/workspace,volume-nocopy",
     ]);
     expect(args.some((arg) => arg.startsWith("type=bind"))).toBe(false);
+    const preparation = {
+      kind: "git_preparer",
+      input: "/tmp/agent-eval-test/preparation-input",
+    } as const;
+    const prepareArgs = containerCreateArguments(
+      image,
+      "agent-eval-test",
+      "agent-eval-test-workspace",
+      1001,
+      1001,
+      false,
+      preparation,
+    );
+    expect(prepareArgs[prepareArgs.indexOf("--memory") + 1]).toBe("805306368");
+    expect(prepareArgs.filter((arg) => arg.startsWith("type=bind"))).toEqual([
+      `type=bind,source=${preparation.input},target=/input,readonly,bind-propagation=rprivate`,
+    ]);
+    const holderArgs = containerCreateArguments(
+      image,
+      "agent-eval-test",
+      "agent-eval-test-workspace",
+      1001,
+      1001,
+      true,
+      preparation,
+    );
+    expect(holderArgs.some((arg) => arg.startsWith("type=bind"))).toBe(false);
     expect(args).toContain(
       "/tmp:rw,noexec,nosuid,nodev,size=67108864,nr_inodes=4096,mode=1777",
     );
@@ -169,6 +215,79 @@ describe("execution boundary", () => {
     expect(() => {
       verify(resolved);
     }).not.toThrow();
+    const preparation = {
+      kind: "git_preparer",
+      input: "/tmp/agent-eval-test/preparation-input",
+    } as const;
+    const inputMount = {
+      Type: "bind",
+      Source: preparation.input,
+      Target: "/input",
+      ReadOnly: true,
+      BindOptions: { Propagation: "rprivate" },
+    };
+    const effectiveInput = {
+      Type: "bind",
+      Source: preparation.input,
+      Destination: "/input",
+      RW: false,
+      Propagation: "rprivate",
+    };
+    const prepared = {
+      ...resolved,
+      HostConfig: {
+        ...resolved.HostConfig,
+        Memory: 805306368,
+        MemorySwap: 805306368,
+        Mounts: [...resolved.HostConfig.Mounts, inputMount],
+      },
+      // Docker can reorder effective mounts; each exact mount must still occur once.
+      Mounts: [effectiveInput, ...resolved.Mounts],
+    };
+    for (const actual of [
+      prepared,
+      { ...prepared, Mounts: [...resolved.Mounts, effectiveInput] },
+    ])
+      expect(() => {
+        assertContainerPolicy(
+          actual,
+          "agent-eval-test-workspace",
+          1001,
+          1001,
+          resolved.Image,
+          false,
+          preparation,
+        );
+      }).not.toThrow();
+    for (const weakened of [
+      { ...prepared, Mounts: [effectiveInput, effectiveInput] },
+      { ...prepared, Mounts: [...resolved.Mounts, ...resolved.Mounts] },
+      {
+        ...prepared,
+        Mounts: [...resolved.Mounts, { ...effectiveInput, RW: true }],
+      },
+      {
+        ...prepared,
+        HostConfig: {
+          ...prepared.HostConfig,
+          Mounts: [
+            ...resolved.HostConfig.Mounts,
+            { ...inputMount, ReadOnly: false },
+          ],
+        },
+      },
+    ])
+      expect(() => {
+        assertContainerPolicy(
+          weakened,
+          "agent-eval-test-workspace",
+          1001,
+          1001,
+          resolved.Image,
+          false,
+          preparation,
+        );
+      }).toThrow("fixed execution policy");
     expect(() => {
       verify({
         ...resolved,
@@ -268,7 +387,7 @@ describe("execution boundary", () => {
       });
       expect(result.commands).toEqual([]);
       expect(result.checks).toMatchObject([
-        { status: "skipped", reason: "execution_failed" },
+        { status: "skipped", reason: "checkout_failed" },
       ]);
       expect(result.errors.join(" ")).toContain("requires a Linux runner");
       expect(result.events.map(({ type }) => type)).not.toContain(

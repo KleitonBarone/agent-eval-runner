@@ -312,6 +312,32 @@ export async function prepareCheckout(
   }
 }
 
+// Used only by the isolated worker. Source config/hooks/refs never enter this repository.
+export async function prepareObjectCheckout(
+  objects: string,
+  revision: string,
+  deadline: SafetyDeadline,
+): Promise<PreparedCheckout> {
+  const source = await mkdtemp(join(tmpdir(), "agent-eval-object-source-"));
+  const template = join(source, "empty-template");
+  await mkdir(template);
+  await git(
+    [
+      "init",
+      "--bare",
+      "--object-format=sha1",
+      `--template=${template}`,
+      source,
+    ],
+    deadline,
+  );
+  await writeFile(
+    join(source, "objects", "info", "alternates"),
+    `${objects}\n`,
+  );
+  return prepareCheckout(source, revision, deadline);
+}
+
 async function writeBlob(
   checkout: PreparedCheckout,
   content: Buffer,

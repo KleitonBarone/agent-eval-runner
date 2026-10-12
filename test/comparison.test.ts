@@ -110,16 +110,19 @@ describe("saved-result comparisons", () => {
       }),
     ).toThrow("Execution identity");
     expect(() => parseResultSpec({ ...result, schemaVersion: "1" })).toThrow(
-      "require result version 5",
+      "require result version 6",
     );
     expect(() => parseResultSpec({ ...result, schemaVersion: "2" })).toThrow(
-      "require result version 5",
+      "require result version 6",
     );
     expect(() => parseResultSpec({ ...result, schemaVersion: "3" })).toThrow(
-      "require result version 5",
+      "require result version 6",
     );
     expect(() => parseResultSpec({ ...result, schemaVersion: "4" })).toThrow(
-      "require result version 5",
+      "require result version 6",
+    );
+    expect(() => parseResultSpec({ ...result, schemaVersion: "5" })).toThrow(
+      "require result version 6",
     );
     expect(() =>
       parseResultSpec({
@@ -150,6 +153,18 @@ describe("saved-result comparisons", () => {
       execution: {
         ...execution,
         containerId: "different-id",
+        preparation: {
+          ...execution.preparation,
+          containerId: "different-preparer-id",
+          inputPath: "/different-input-path",
+          snapshotSha256: "b".repeat(64),
+          storage: {
+            ...execution.preparation.storage,
+            volumeName: "different-preparer-volume",
+            holderName: "different-preparer-holder",
+            holderId: "different-preparer-holder-id",
+          },
+        },
         storage: {
           ...execution.storage,
           volumeName: "different-volume",
@@ -175,6 +190,12 @@ describe("saved-result comparisons", () => {
     expect(compare().warnings).toEqual([
       "Runtime identities differ. Durations and executable behavior may not be comparable.",
     ]);
+    second.execution.engineVersion = execution.engineVersion;
+    second.execution.preparation.git = "git version 2.99.0";
+    expect(compare().warnings).toHaveLength(1);
+    second.execution.preparation.git = execution.preparation.git;
+    second.execution.preparation.workerSha256 = "c".repeat(64);
+    expect(compare().warnings).toHaveLength(1);
   });
 
   it("preserves scheduling order, warns about differing runtimes, and propagates missing usage", async () => {

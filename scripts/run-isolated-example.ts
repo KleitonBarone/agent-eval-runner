@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { access, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import {
+  access,
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  writeFile,
+} from "node:fs/promises";
 import { createServer } from "node:net";
 import { networkInterfaces, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -13,6 +21,8 @@ import { parseResultSpec, type ResultSpec } from "../src/result.js";
 import { writeJsonAtomic } from "../src/persistence.js";
 import { SAFETY_POLICY } from "../src/safety.js";
 import { CONTAINER_POLICY } from "../src/execution-spec.js";
+import { PREPARATION_IMAGE } from "../src/execution-spec.js";
+import { prepareCheckout, removeCheckout } from "../src/git.js";
 import { runEvaluation } from "../src/runner.js";
 import type { TaskSpec } from "../src/spec.js";
 import {
@@ -61,7 +71,11 @@ const results: ResultSpec[] = [];
 async function savedAttempt(
   task: TaskSpec,
   label: string,
-  options: { signal?: AbortSignal; cli?: boolean } = {},
+  options: {
+    signal?: AbortSignal;
+    cli?: boolean;
+    preparationFailed?: boolean;
+  } = {},
 ) {
   const path = join(output, `${label}.json`);
   let result: ResultSpec;
@@ -96,6 +110,34 @@ async function savedAttempt(
   assert.deepEqual(parseResultSpec(raw), result);
   assert.deepEqual(result.safety, SAFETY_POLICY);
   assert.equal(result.execution.kind, "docker");
+  assert.equal(result.execution.preparation.requestedImage, PREPARATION_IMAGE);
+  if (options.preparationFailed === true) {
+    assert.equal(result.commands.length, 0);
+    assert.equal(result.source.resolvedRevision, null);
+    assert.equal(
+      result.status,
+      options.signal?.aborted === true ? "interrupted" : "failed",
+    );
+    assert.ok(result.execution.preparation.inputPath);
+    assert.equal(
+      result.events.some(({ type }) => type === "agent.started"),
+      false,
+    );
+    process.stderr.write(`Finalized isolated ${label}: ${result.status}\n`);
+    return result;
+  }
+  assert.match(result.execution.preparation.git ?? "", /^git version /u);
+  assert.equal(result.execution.preparation.node, "v24.20.0");
+  assert.equal(result.execution.preparation.cleanup, "removed");
+  assert.equal(result.execution.preparation.storage.verified, true);
+  assert.match(
+    result.execution.preparation.workerSha256 ?? "",
+    /^[0-9a-f]{64}$/u,
+  );
+  assert.match(
+    result.execution.preparation.snapshotSha256 ?? "",
+    /^[0-9a-f]{64}$/u,
+  );
   assert.equal(result.execution.cleanup, "removed");
   assert.equal(result.execution.storage.verified, true);
   assert.ok(["removed", "retained"].includes(result.execution.storage.cleanup));
@@ -221,6 +263,192 @@ try {
   assert.equal(
     Buffer.from(success.artifacts[0]?.contentBase64 ?? "", "base64").toString(),
     "answer\n",
+  );
+
+  const packedSource = await createTestRepository({
+    ".gitattributes": "*.txt filter=trap text eol=crlf ident\n",
+    ".gitignore": "ignored.txt\n",
+    "base.txt": "raw $Id$\n",
+    "binary.bin": "\0old binary\n",
+  });
+  await execFileAsync("git", ["-C", packedSource.path, "repack", "-ad"]);
+  const originalConfig = await readFile(
+    join(packedSource.path, ".git", "config"),
+  );
+  await writeFile(
+    join(packedSource.path, ".git", "config"),
+    "malformed Git configuration\n",
+  );
+  const trap = join(fixtureRoot, "host-git-trap");
+  await mkdir(trap);
+  await writeFile(join(trap, "git"), "#!/bin/sh\nexit 94\n", { mode: 0o755 });
+  const previousPath = process.env["PATH"];
+  process.env["PATH"] = `${trap}:${previousPath ?? ""}`;
+  let packed: ResultSpec;
+  try {
+    packed = await savedAttempt(
+      {
+        ...base,
+        repository: packedSource,
+        adapter: {
+          kind: "fake",
+          actions: [
+            ...base.adapter.actions,
+            {
+              kind: "writeFile",
+              path: "ignored.txt",
+              content: "included despite ignore\n",
+            },
+            {
+              kind: "writeFile",
+              path: "binary.bin",
+              content: "\0new binary\n",
+            },
+            { kind: "writeFile", path: "base.txt", content: "raw new $Id$\n" },
+          ],
+        },
+      },
+      "git-contained-packed",
+    );
+  } finally {
+    if (previousPath === undefined) delete process.env["PATH"];
+    else process.env["PATH"] = previousPath;
+    await writeFile(join(packedSource.path, ".git", "config"), originalConfig);
+  }
+  assert.equal(packed.status, "succeeded", packed.errors.join("\n"));
+  assert.match(packed.patch.content, /GIT binary patch/u);
+  assert.match(packed.patch.content, /ignored\.txt/u);
+  const replay = await prepareCheckout(
+    packedSource.path,
+    packedSource.revision,
+  );
+  try {
+    const applied = execFileAsync("git", [
+      "-C",
+      replay.path,
+      "-c",
+      "core.autocrlf=false",
+      "apply",
+      "--binary",
+      "--index",
+      "-",
+    ]);
+    applied.child.stdin?.end(packed.patch.content);
+    await applied;
+    assert.deepEqual(
+      await readFile(join(replay.path, "binary.bin")),
+      Buffer.from("\0new binary\n"),
+    );
+    assert.equal(
+      await readFile(join(replay.path, "base.txt"), "utf8"),
+      "raw new $Id$\n",
+    );
+    assert.equal(
+      await readFile(join(replay.path, "ignored.txt"), "utf8"),
+      "included despite ignore\n",
+    );
+  } finally {
+    await removeCheckout(replay);
+  }
+
+  const alternateSource = await createTestRepository();
+  await writeFile(
+    join(alternateSource.path, ".git", "objects", "info", "alternates"),
+    `${repository.path}/.git/objects\n`,
+  );
+  const alternate = await savedAttempt(
+    { ...base, repository: alternateSource },
+    "rejected-alternates",
+    { preparationFailed: true },
+  );
+  assert.match(alternate.errors.join("\n"), /External Git alternates/u);
+  assert.equal(alternate.execution.kind, "docker");
+  assert.equal(alternate.execution.preparation.cleanup, "not_created");
+  assert.equal(alternate.workspace.retained, true);
+
+  const malformedSource = await createTestRepository();
+  await chmod(
+    join(
+      malformedSource.path,
+      ".git",
+      "objects",
+      malformedSource.revision.slice(0, 2),
+      malformedSource.revision.slice(2),
+    ),
+    0o600,
+  );
+  await writeFile(
+    join(
+      malformedSource.path,
+      ".git",
+      "objects",
+      malformedSource.revision.slice(0, 2),
+      malformedSource.revision.slice(2),
+    ),
+    "not a compressed Git object",
+  );
+  const malformed = await savedAttempt(
+    { ...base, repository: malformedSource },
+    "malformed-object",
+    { preparationFailed: true },
+  );
+  assert.equal(malformed.execution.kind, "docker");
+  assert.equal(malformed.execution.preparation.cleanup, "removed");
+  assert.equal(malformed.execution.preparation.storage.cleanup, "retained");
+  assert.match(malformed.execution.preparation.git ?? "", /^git version /u);
+  assert.equal(malformed.workspace.retained, true);
+
+  const preparationController = new AbortController();
+  const preparing = savedAttempt(base, "preparation-cancelled", {
+    signal: preparationController.signal,
+    preparationFailed: true,
+  });
+  let watchingPreparation = false;
+  const preparationPoll = setInterval(() => {
+    if (watchingPreparation) return;
+    watchingPreparation = true;
+    void (async () => {
+      for (const entry of await readdir(fixtureRoot)) {
+        if (!entry.startsWith("agent-eval-worktree-")) continue;
+        const root = join(fixtureRoot, entry);
+        const marker: unknown = JSON.parse(
+          await readFile(join(root, "source.json"), "utf8").catch(() => "null"),
+        );
+        if (
+          typeof marker === "object" &&
+          marker !== null &&
+          "sourcePath" in marker &&
+          marker.sourcePath === repository.path &&
+          (await access(join(root, "object-snapshot.json")).then(
+            () => true,
+            () => false,
+          ))
+        )
+          preparationController.abort();
+      }
+    })()
+      .catch(() => {
+        // An owned directory may be finalized between listing and inspection.
+      })
+      .finally(() => {
+        watchingPreparation = false;
+      });
+  }, 25);
+  const preparationFallback = setTimeout(() => {
+    preparationController.abort();
+  }, 20_000);
+  let preparationCancelled: ResultSpec;
+  try {
+    preparationCancelled = await preparing;
+  } finally {
+    clearInterval(preparationPoll);
+    clearTimeout(preparationFallback);
+  }
+  assert.equal(preparationCancelled.attempt.outcome, "cancelled");
+  assert.equal(preparationCancelled.workspace.retained, true);
+  assert.equal(
+    preparationCancelled.checks.every((check) => check.status === "skipped"),
+    true,
   );
 
   const failed = await savedAttempt(
@@ -630,6 +858,23 @@ try {
       () => false,
     );
     assert.equal(containerExists, false, "Container was not removed");
+    for (const name of [
+      row.execution.preparation.containerId,
+      row.execution.preparation.storage.holderName,
+      row.execution.preparation.storage.volumeName,
+    ]) {
+      assert.ok(name);
+      const exists = await execFileAsync("docker", [
+        "--host",
+        "unix:///var/run/docker.sock",
+        "inspect",
+        name,
+      ]).then(
+        () => true,
+        () => false,
+      );
+      assert.equal(exists, false, "Preparation resource was not removed");
+    }
     for (const name of [
       row.execution.storage.holderName,
       row.execution.storage.volumeName,

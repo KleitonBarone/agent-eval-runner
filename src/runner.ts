@@ -35,6 +35,7 @@ import { scoreChecks } from "./scoring.js";
 import { parseTaskSpec, type TaskSpec } from "./spec.js";
 import { fakeUsage } from "./usage.js";
 import { SAFETY_POLICY, SafetyDeadline } from "./safety.js";
+import { GitPreparation } from "./git-preparation.js";
 
 export interface RunEvaluationOptions {
   readonly outputPath?: string;
@@ -139,6 +140,10 @@ export async function runEvaluation(
   let backend: ExecutionBackend | undefined;
   let executionPrepared = false;
   const execution = initialExecutionEvidence(task.execution);
+  const gitPreparation =
+    execution.kind === "docker"
+      ? new GitPreparation(execution.preparation, redact)
+      : undefined;
   let attemptOutcome: ResultSpec["attempt"]["outcome"] = "runner_error";
   let attemptDurationMs = 0;
   let commandCount = 0;
@@ -152,11 +157,18 @@ export async function runEvaluation(
     attemptOutcome = "cancelled";
   } else {
     try {
-      checkout = await prepareCheckout(
-        task.repository.path,
-        task.repository.revision,
-        preparationDeadline,
-      );
+      checkout =
+        gitPreparation === undefined
+          ? await prepareCheckout(
+              task.repository.path,
+              task.repository.revision,
+              preparationDeadline,
+            )
+          : await gitPreparation.prepare(
+              task.repository.path,
+              task.repository.revision,
+              preparationDeadline,
+            );
       recorder.record({
         type: "checkout.prepared",
         revision: checkout.revision,
@@ -165,6 +177,7 @@ export async function runEvaluation(
       if (preparationDeadline.signal?.aborted === true)
         attemptOutcome = "cancelled";
       addError("checkout", error);
+      if (gitPreparation?.checkout !== undefined) retainWorkspace = true;
     }
   }
 
@@ -280,7 +293,10 @@ export async function runEvaluation(
     const captureDeadline = new SafetyDeadline();
     try {
       await executor.synchronize(captureDeadline);
-      const capturedPatch = await capturePatch(checkout, captureDeadline);
+      const capturedPatch =
+        gitPreparation === undefined
+          ? await capturePatch(checkout, captureDeadline)
+          : await gitPreparation.capture(captureDeadline);
       const sanitizedPatch = redact(capturedPatch);
       if (Buffer.byteLength(sanitizedPatch) > SAFETY_POLICY.patchBytes)
         throw new Error("Redacted patch byte limit exceeded");
@@ -411,6 +427,12 @@ export async function runEvaluation(
       addError("container cleanup", error);
     }
   }
+  try {
+    await gitPreparation?.dispose();
+  } catch (error) {
+    retainWorkspace = true;
+    addError("preparation cleanup", error);
+  }
   const score = scoreChecks(checks);
   recorder.record({
     type: "score.computed",
@@ -428,14 +450,15 @@ export async function runEvaluation(
         errors.length === 0
       ? "succeeded"
       : "failed";
+  const workspaceCheckout = checkout ?? gitPreparation?.checkout;
   const result: ResultSpec = {
-    $schema: "https://agent-eval-runner.dev/schemas/result-v5.schema.json",
-    schemaVersion: "5",
+    $schema: "https://agent-eval-runner.dev/schemas/result-v6.schema.json",
+    schemaVersion: "6",
     safety: { ...SAFETY_POLICY },
     execution,
     runner: {
       name: "agent-eval-runner",
-      version: "0.5.0",
+      version: "0.6.0",
       node: process.version,
       platform: process.platform,
       arch: process.arch,
@@ -476,8 +499,9 @@ export async function runEvaluation(
       content: redactedPatch,
     },
     workspace: {
-      retained: checkout !== undefined,
-      path: checkout === undefined ? null : redact(checkout.path),
+      retained: workspaceCheckout !== undefined,
+      path:
+        workspaceCheckout === undefined ? null : redact(workspaceCheckout.path),
     },
   };
   assertResultSpec(result);
@@ -492,7 +516,9 @@ export async function runEvaluation(
   ) {
     try {
       await backend?.removeWorkspace();
+      await gitPreparation?.removeWorkspace();
       await removeCheckout(checkout);
+      if (execution.kind === "docker") execution.preparation.inputPath = null;
       result.workspace = { retained: false, path: null };
     } catch (error) {
       addError("cleanup", error);

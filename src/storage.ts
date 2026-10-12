@@ -4,15 +4,19 @@ import { dirname } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
-import { CONTAINER_POLICY } from "./execution-spec.js";
+import { CONTAINER_POLICY, type ContainerPolicy } from "./execution-spec.js";
 import { resolveInside } from "./paths.js";
 import { SAFETY_POLICY, type SafetyDeadline } from "./safety.js";
 import { assertPortablePath, registerPath } from "./workspace.js";
 
 export const STORAGE_TRANSFER_BYTES = 96 * 1024 * 1024;
 
-export function volumeOptions(uid: number, gid: number): string {
-  return `rw,nosuid,nodev,size=${String(CONTAINER_POLICY.workspaceBytes)},nr_inodes=${String(CONTAINER_POLICY.workspaceInodes)},uid=${String(uid)},gid=${String(gid)},mode=0700`;
+export function volumeOptions(
+  uid: number,
+  gid: number,
+  policy: ContainerPolicy = CONTAINER_POLICY,
+): string {
+  return `rw,nosuid,nodev,size=${String(policy.workspaceBytes)},nr_inodes=${String(policy.workspaceInodes)},uid=${String(uid)},gid=${String(gid)},mode=0700`;
 }
 
 export function assertVolumePolicy(
@@ -20,6 +24,7 @@ export function assertVolumePolicy(
   name: string,
   uid: number,
   gid: number,
+  policy: ContainerPolicy = CONTAINER_POLICY,
 ): void {
   const schema = Type.Object({
     Name: Type.Literal(name),
@@ -30,7 +35,7 @@ export function assertVolumePolicy(
       {
         type: Type.Literal("tmpfs"),
         device: Type.Literal("tmpfs"),
-        o: Type.Literal(volumeOptions(uid, gid)),
+        o: Type.Literal(volumeOptions(uid, gid, policy)),
       },
       { additionalProperties: false },
     ),
@@ -50,12 +55,14 @@ const ProbeSchema = Type.Object({
   temporary: FilesystemSchema,
 });
 
-export function assertStorageProbe(input: unknown): void {
+export function assertStorageProbe(
+  input: unknown,
+  policy: ContainerPolicy = CONTAINER_POLICY,
+): void {
   if (
     !Value.Check(ProbeSchema, input) ||
-    input.workspace.bsize * input.workspace.blocks !==
-      CONTAINER_POLICY.workspaceBytes ||
-    input.workspace.files !== CONTAINER_POLICY.workspaceInodes ||
+    input.workspace.bsize * input.workspace.blocks !== policy.workspaceBytes ||
+    input.workspace.files !== policy.workspaceInodes ||
     input.temporary.bsize * input.temporary.blocks !==
       CONTAINER_POLICY.temporaryBytes ||
     input.temporary.files !== CONTAINER_POLICY.temporaryInodes

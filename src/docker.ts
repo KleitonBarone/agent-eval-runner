@@ -7,7 +7,12 @@ import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
 import type { ExecutionBackend } from "./execution.js";
-import { CONTAINER_POLICY, type ExecutionEvidence } from "./execution-spec.js";
+import {
+  CONTAINER_POLICY,
+  PREPARATION_CONTAINER_POLICY,
+  type ContainerPolicy,
+  type DockerRuntime,
+} from "./execution-spec.js";
 import { assertCheckoutRoot, type PreparedCheckout } from "./git.js";
 import { resolveInside } from "./paths.js";
 import {
@@ -33,7 +38,14 @@ import {
   STORAGE_TRANSFER_BYTES,
 } from "./storage.js";
 
-type DockerEvidence = Extract<ExecutionEvidence, { kind: "docker" }>;
+export type DockerRole =
+  | { readonly kind: "agent" }
+  | { readonly kind: "git_preparer"; readonly input: string };
+function rolePolicy(role: DockerRole): ContainerPolicy {
+  return role.kind === "agent"
+    ? CONTAINER_POLICY
+    : PREPARATION_CONTAINER_POLICY;
+}
 const CONTROL_TIMEOUT_MS = 10_000;
 const KEEPER_SCRIPT = "setInterval(() => {}, 1000)";
 const ImageInspection = Type.Object({
@@ -55,7 +67,54 @@ export function assertContainerPolicy(
   gid: number,
   imageId: string,
   readOnly = false,
+  role: DockerRole = { kind: "agent" },
 ): void {
+  const policy = rolePolicy(role);
+  const volumeMount = Type.Object({
+    Type: Type.Literal("volume"),
+    Source: Type.Literal(volume),
+    Target: Type.Literal("/workspace"),
+    ReadOnly: readOnly
+      ? Type.Literal(true)
+      : Type.Optional(Type.Literal(false)),
+    VolumeOptions: Type.Object({ NoCopy: Type.Literal(true) }),
+  });
+  const effectiveVolume = Type.Object({
+    Type: Type.Literal("volume"),
+    Name: Type.Literal(volume),
+    Driver: Type.Literal("local"),
+    Destination: Type.Literal("/workspace"),
+    RW: Type.Literal(!readOnly),
+  });
+  const mounts =
+    role.kind === "git_preparer" && !readOnly
+      ? Type.Tuple([
+          volumeMount,
+          Type.Object({
+            Type: Type.Literal("bind"),
+            Source: Type.Literal(role.input),
+            Target: Type.Literal("/input"),
+            ReadOnly: Type.Literal(true),
+            BindOptions: Type.Object({ Propagation: Type.Literal("rprivate") }),
+          }),
+        ])
+      : Type.Tuple([volumeMount]);
+  const effectiveMounts =
+    role.kind === "git_preparer" && !readOnly
+      ? Type.Array(
+          Type.Union([
+            effectiveVolume,
+            Type.Object({
+              Type: Type.Literal("bind"),
+              Source: Type.Literal(role.input),
+              Destination: Type.Literal("/input"),
+              RW: Type.Literal(false),
+              Propagation: Type.Literal("rprivate"),
+            }),
+          ]),
+          { minItems: 2, maxItems: 2 },
+        )
+      : Type.Tuple([effectiveVolume]);
   const schema = Type.Object({
     Image: Type.Literal(imageId),
     Config: Type.Object({
@@ -74,8 +133,8 @@ export function assertContainerPolicy(
         minItems: 1,
         maxItems: 1,
       }),
-      Memory: Type.Literal(CONTAINER_POLICY.memoryBytes),
-      MemorySwap: Type.Literal(CONTAINER_POLICY.memoryBytes),
+      Memory: Type.Literal(policy.memoryBytes),
+      MemorySwap: Type.Literal(policy.memoryBytes),
       NanoCpus: Type.Literal(CONTAINER_POLICY.cpus * 1_000_000_000),
       PidsLimit: Type.Literal(CONTAINER_POLICY.pids),
       PidMode: Type.Literal(""),
@@ -83,18 +142,7 @@ export function assertContainerPolicy(
       Init: Type.Literal(true),
       LogConfig: Type.Object({ Type: Type.Literal("none") }),
       RestartPolicy: Type.Object({ Name: Type.Literal("no") }),
-      Mounts: Type.Array(
-        Type.Object({
-          Type: Type.Literal("volume"),
-          Source: Type.Literal(volume),
-          Target: Type.Literal("/workspace"),
-          ReadOnly: readOnly
-            ? Type.Literal(true)
-            : Type.Optional(Type.Literal(false)),
-          VolumeOptions: Type.Object({ NoCopy: Type.Literal(true) }),
-        }),
-        { minItems: 1, maxItems: 1 },
-      ),
+      Mounts: mounts,
       Binds: Type.Union([
         Type.Null(),
         Type.Array(Type.String(), { maxItems: 0 }),
@@ -108,18 +156,12 @@ export function assertContainerPolicy(
         { additionalProperties: false },
       ),
     }),
-    Mounts: Type.Array(
-      Type.Object({
-        Type: Type.Literal("volume"),
-        Name: Type.Literal(volume),
-        Driver: Type.Literal("local"),
-        Destination: Type.Literal("/workspace"),
-        RW: Type.Literal(!readOnly),
-      }),
-      { minItems: 1, maxItems: 1 },
-    ),
+    Mounts: effectiveMounts,
   });
-  if (!Value.Check(schema, input))
+  if (
+    !Value.Check(schema, input) ||
+    input.Mounts.filter((mount) => mount.Type === "volume").length !== 1
+  )
     throw new Error(
       `Docker resolved settings do not match the fixed execution policy: ${[
         ...Value.Errors(schema, input),
@@ -138,11 +180,15 @@ export function containerCreateArguments(
   uid: number,
   gid: number,
   readOnly = false,
+  role: DockerRole = { kind: "agent" },
 ): string[] {
+  const policy = rolePolicy(role);
   if (uid <= 0 || !Number.isInteger(uid) || gid < 0 || !Number.isInteger(gid))
     throw new Error("Container execution requires a non-root Linux user");
   if (!/^agent-eval-[a-zA-Z0-9-]+$/u.test(volume))
     throw new Error("Invalid owned Docker volume name");
+  if (role.kind === "git_preparer" && role.input.includes(","))
+    throw new Error("Preparation mount path contains a comma");
   return [
     "create",
     "--name",
@@ -161,9 +207,9 @@ export function containerCreateArguments(
     "--user",
     `${String(uid)}:${String(gid)}`,
     "--memory",
-    String(CONTAINER_POLICY.memoryBytes),
+    String(policy.memoryBytes),
     "--memory-swap",
-    String(CONTAINER_POLICY.memoryBytes),
+    String(policy.memoryBytes),
     "--cpus",
     String(CONTAINER_POLICY.cpus),
     "--pids-limit",
@@ -178,6 +224,12 @@ export function containerCreateArguments(
     `/tmp:rw,noexec,nosuid,nodev,size=${String(CONTAINER_POLICY.temporaryBytes)},nr_inodes=${String(CONTAINER_POLICY.temporaryInodes)},mode=1777`,
     "--mount",
     `type=volume,source=${volume},target=/workspace,volume-nocopy${readOnly ? ",readonly" : ""}`,
+    ...(role.kind === "git_preparer" && !readOnly
+      ? [
+          "--mount",
+          `type=bind,source=${role.input},target=/input,readonly,bind-propagation=rprivate`,
+        ]
+      : []),
     "--workdir",
     "/workspace",
     "--entrypoint",
@@ -225,8 +277,9 @@ export class DockerExecution implements ExecutionBackend {
   constructor(
     readonly checkout: PreparedCheckout,
     readonly image: string,
-    readonly evidence: DockerEvidence,
+    readonly evidence: DockerRuntime,
     readonly redact: Redactor,
+    readonly role: DockerRole = { kind: "agent" },
   ) {}
 
   async #docker(
@@ -297,9 +350,12 @@ export class DockerExecution implements ExecutionBackend {
     this.#workspace = join(this.#root, "workspace");
     this.evidence.workspacePath = this.#workspace;
     await mkdir(this.#workspace);
-    const files = await scanWorkspace(this.checkout.path, deadline, {
-      skipRootGit: true,
-    });
+    const files =
+      this.role.kind === "agent"
+        ? await scanWorkspace(this.checkout.path, deadline, {
+            skipRootGit: true,
+          })
+        : [];
     const input: unknown = JSON.parse(
       await this.#control(
         ["image", "inspect", "--format", "{{json .}}", this.image],
@@ -347,7 +403,7 @@ export class DockerExecution implements ExecutionBackend {
         "--opt",
         "device=tmpfs",
         "--opt",
-        `o=${volumeOptions(uid, gid)}`,
+        `o=${volumeOptions(uid, gid, rolePolicy(this.role))}`,
         this.#volume,
       ],
       signal,
@@ -363,6 +419,7 @@ export class DockerExecution implements ExecutionBackend {
         uid,
         gid,
         true,
+        this.role,
       ),
       signal,
       deadline,
@@ -377,7 +434,15 @@ export class DockerExecution implements ExecutionBackend {
         deadline,
       ),
     );
-    assertContainerPolicy(holder, this.#volume, uid, gid, input.Id, true);
+    assertContainerPolicy(
+      holder,
+      this.#volume,
+      uid,
+      gid,
+      input.Id,
+      true,
+      this.role,
+    );
     await this.#control(["start", this.#holder], signal, deadline);
     this.#holderStartedAt = await this.#control(
       ["inspect", "--format", "{{.State.StartedAt}}", this.#holder],
@@ -400,7 +465,15 @@ export class DockerExecution implements ExecutionBackend {
     this.#created = true;
     this.evidence.cleanup = "pending";
     const id = await this.#control(
-      containerCreateArguments(this.image, this.#name, this.#volume, uid, gid),
+      containerCreateArguments(
+        this.image,
+        this.#name,
+        this.#volume,
+        uid,
+        gid,
+        false,
+        this.role,
+      ),
       signal,
       deadline,
     );
@@ -414,7 +487,15 @@ export class DockerExecution implements ExecutionBackend {
         deadline,
       ),
     );
-    assertContainerPolicy(container, this.#volume, uid, gid, input.Id);
+    assertContainerPolicy(
+      container,
+      this.#volume,
+      uid,
+      gid,
+      input.Id,
+      false,
+      this.role,
+    );
     const runtime = await this.execute({
       command: "/usr/local/bin/node",
       args: ["-p", "process.version"],
@@ -456,8 +537,12 @@ export class DockerExecution implements ExecutionBackend {
         `Storage verification failed: ${probe.error ?? probe.stderr}`,
       );
     const mounted: unknown = JSON.parse(probe.stdout);
-    assertStorageProbe(mounted);
+    assertStorageProbe(mounted, rolePolicy(this.role));
     this.evidence.storage.verified = true;
+    if (this.role.kind === "git_preparer") {
+      this.#prepared = true;
+      return;
+    }
     const imported = [];
     let importBytes = 0;
     for (const file of files) {
@@ -514,6 +599,7 @@ export class DockerExecution implements ExecutionBackend {
       this.#volume,
       this.evidence.uid ?? -1,
       this.evidence.gid ?? -1,
+      rolePolicy(this.role),
     );
   }
 
@@ -540,7 +626,10 @@ export class DockerExecution implements ExecutionBackend {
     await this.#control(["rm", "--force", name]);
   }
 
-  async execute(request: ProcessRequest): Promise<ProcessResult> {
+  async execute(
+    request: ProcessRequest,
+    redact: Redactor = this.redact,
+  ): Promise<ProcessResult> {
     if (!this.#created) throw new Error("Container has not been created");
     if (!this.#quiescent)
       throw new Error("Container did not stop after the previous command");
@@ -643,6 +732,7 @@ export class DockerExecution implements ExecutionBackend {
             ...(request.input === undefined ? {} : { input: request.input }),
             ...(request.signal === undefined ? {} : { signal: request.signal }),
           },
+          redact,
         );
       }
     } catch (error) {
@@ -798,6 +888,10 @@ export class DockerExecution implements ExecutionBackend {
       files,
       deadline,
     );
+  }
+
+  finishExport(): void {
+    this.#exportComplete = true;
   }
 
   async dispose(): Promise<void> {

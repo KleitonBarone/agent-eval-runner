@@ -89,6 +89,17 @@ function executionRuntime(execution: ExecutionEvidence) {
         engineVersion: execution.engineVersion,
         uid: execution.uid,
         gid: execution.gid,
+        preparation: {
+          policyVersion: execution.preparation.policyVersion,
+          imageId: execution.preparation.imageId,
+          node: execution.preparation.node,
+          git: execution.preparation.git,
+          engineVersion: execution.preparation.engineVersion,
+          architecture: execution.preparation.architecture,
+          uid: execution.preparation.uid,
+          gid: execution.preparation.gid,
+          workerSha256: execution.preparation.workerSha256,
+        },
       };
 }
 
@@ -171,7 +182,7 @@ export function createComparison(
       `Batch state is ${index.state}; some attempts may be unfinished.`,
     );
   const report: ComparisonSpec = {
-    schemaVersion: "4",
+    schemaVersion: "5",
     batchId: index.id,
     comparisonSha256: index.comparisonSha256,
     scoringVersion: "2",

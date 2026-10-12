@@ -6,13 +6,19 @@ import { BatchIndexSchema, BatchSpecSchema } from "../src/batch-spec.js";
 import { ComparisonSpecSchema } from "../src/comparison-spec.js";
 import { ResultSpecSchema } from "../src/result.js";
 import { TaskSpecSchema } from "../src/spec.js";
+import {
+  PreparationRequestSchema,
+  PreparationResponseSchema,
+} from "../src/preparation-protocol.js";
 
 const schemas = [
   ["schemas/task-v1.schema.json", TaskSpecSchema],
-  ["schemas/result-v5.schema.json", ResultSpecSchema],
+  ["schemas/result-v6.schema.json", ResultSpecSchema],
   ["schemas/batch-v1.schema.json", BatchSpecSchema],
   ["schemas/batch-index-v1.schema.json", BatchIndexSchema],
-  ["schemas/comparison-v4.schema.json", ComparisonSpecSchema],
+  ["schemas/comparison-v5.schema.json", ComparisonSpecSchema],
+  ["schemas/preparation-request-v1.schema.json", PreparationRequestSchema],
+  ["schemas/preparation-response-v1.schema.json", PreparationResponseSchema],
 ] as const;
 const mode = process.argv[2];
 if (mode !== "--check" && mode !== "--write") {

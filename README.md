@@ -1,6 +1,6 @@
 # Agent Eval Runner
 
-Agent Eval Runner executes coding-agent attempts at an exact Git commit and compares their saved evidence. Milestones 0, 1, and 2 are implemented. Version 0.5.0 adds kernel-enforced Linux workspace storage limits to the raw-object checkout and bounded capture from 0.4.0. Milestone 3 remains incomplete. The only adapter is a deterministic fake agent for trusted local development and tests.
+Agent Eval Runner executes coding-agent attempts at an exact Git commit and compares their saved evidence. Milestones 0, 1, and 2 are implemented. Version 0.6.0 moves Docker checkout and patch Git operations into a separate restricted preparer. Milestone 3 remains incomplete. The only adapter is a deterministic fake agent for trusted local development and tests.
 
 The runner does not call model APIs. Do not use it on untrusted repositories yet.
 
@@ -20,6 +20,7 @@ The runner does not call model APIs. Do not use it on untrusted repositories yet
 - Digest-pinned Linux containers with fixed network, filesystem, privilege, and resource restrictions
 - Runner-owned Git metadata, raw blob checkout, and bounded workspace/patch/artifact capture
 - Live Linux tmpfs byte/inode limits, verified before any agent action
+- Contained Git parsing for Docker runs, with bounded object snapshots and a versioned worker protocol
 
 Start with `pnpm install --frozen-lockfile`, `pnpm build`, and `pnpm example`. Docker is optional for that path.
 
@@ -37,13 +38,13 @@ Start with `pnpm install --frozen-lockfile`, `pnpm build`, and `pnpm example`. D
 
 The runtime is Node.js 22 or newer, strict TypeScript, and pnpm. Node gives the runner cross-platform process control without adding a second runtime. TypeBox defines runtime validators, TypeScript types, and the checked-in JSON Schemas from the same source.
 
-The execution boundary is a detached Git worktree in a runner-owned temporary repository. The source supplies commit objects through a read-only Git object alternate, not its configuration or worktree metadata. Preparation validates the exact commit and tree, then materializes verified raw blob bytes. Git runs with a reduced environment, no system/global configuration, disabled hooks/fsmonitor, an empty initialization template, no lazy fetch, and no network protocols. Private attributes disable filters, line-ending conversion, ident expansion, and working-tree encoding conversion. Git LFS pointers remain pointers; submodules and symlinks are rejected, not fetched or followed.
+The local execution boundary is a detached Git worktree in a runner-owned temporary repository. The source supplies commit objects through a read-only Git object alternate, not its configuration or worktree metadata. Preparation validates the exact commit and tree, then materializes verified raw blob bytes. Git runs with a reduced environment, no system/global configuration, disabled hooks/fsmonitor, an empty initialization template, no lazy fetch, and no network protocols. Private attributes disable filters, line-ending conversion, ident expansion, and working-tree encoding conversion. Git LFS pointers remain pointers; submodules and symlinks are rejected, not fetched or followed.
 
-Each attempt starts fresh. Its `agent-eval-worktree-<suffix>` directory holds `checkout`, private Git metadata, and the source identity. The source repository receives no worktree registration or captured blobs. Before removing the private directory, the runner saves an evidence snapshot when an output path was supplied. `--keep-worktree`, failed capture, initial persistence failure, and cleanup failure retain it. Inspect retained metadata with `git -C <saved-workspace-path> worktree list`; the source repository's worktree list no longer tracks attempts.
+Each attempt starts fresh. Its `agent-eval-worktree-<suffix>` directory holds `checkout`, private Git metadata, and the source identity. The source repository receives no worktree registration or captured blobs. Before removing the private directory, the runner saves an evidence snapshot when an output path was supplied. `--keep-worktree`, failed capture, initial persistence failure, and cleanup failure retain it. For local runs, inspect retained metadata with `git -C <saved-workspace-path> worktree list`; the source repository's worktree list no longer tracks attempts. Docker host checkouts are plain validated file snapshots; their private Git metadata stays in the preparer's quota volume.
 
-A worktree is disposable, but it is not a security sandbox. Local agent and check processes retain the runner user's filesystem permissions and network access. They can reach the source repository, other local files, and local services. Host Git still parses source repository metadata and objects. Use only repositories and commands you trust.
+A worktree is disposable, but it is not a security sandbox. Local agent and check processes retain the runner user's filesystem permissions and network access. They can reach the source repository, other local files, and local services. Local Git still parses source repository metadata and objects. Use only repositories and commands you trust.
 
-Setting `execution.kind` to `docker` runs fake-agent writes, commands, and checks in a Linux container. The host still prepares a worktree, but the container receives only verified files in a quota-limited tmpfs volume without `.git`, not a writable host directory. It never receives the source repository, Docker socket, host home directory, or inherited host credentials. Unsupported systems, missing images, unavailable quota mounts, and preparation failures produce failed evidence; they never fall back to local execution. See [the isolation policy and threat model](docs/isolation.md) before using this backend.
+Setting `execution.kind` to `docker` runs fake-agent writes, commands, and checks in a Linux container. A separate offline preparer resolves Git objects and generates patches; Docker evaluations never invoke host Git. The agent receives only validated files in a quota-limited tmpfs volume without `.git`, not a writable host directory. It never receives the source repository, Docker socket, host home directory, or inherited host credentials. Unsupported systems, missing images, unavailable quota mounts, and preparation failures produce failed evidence; they never fall back to local execution. See [the isolation policy and threat model](docs/isolation.md) before using this backend.
 
 ## Install and verify
 
@@ -61,7 +62,7 @@ pnpm build
 pnpm example
 ```
 
-The example resolves this repository's current commit, writes a version 1 task to `.agent-eval/example-task.json`, and runs the fake adapter in a disposable worktree. Its version 5 result is `.agent-eval/example-result.json`. Repeating this single-run example replaces those two files. The directory is ignored by Git so local evaluation evidence is not published by accident.
+The example resolves this repository's current commit, writes a version 1 task to `.agent-eval/example-task.json`, and runs the fake adapter in a disposable worktree. Its version 6 result is `.agent-eval/example-result.json`. Repeating this single-run example replaces those two files. The directory is ignored by Git so local evaluation evidence is not published by accident.
 
 After `pnpm build`, the equivalent CLI form is:
 
@@ -75,15 +76,16 @@ The CLI exits with code 0 for success, 1 for a completed failure, 2 for invalid 
 
 Use a non-root Linux account with access to a trusted local Docker Engine at `/var/run/docker.sock`. The runner does not support remote engines, arbitrary Docker flags, or native Windows container execution. The trusted image must provide Node.js 22 or newer at `/usr/local/bin/node` and must not declare volumes.
 
-Preinstall the example's official Node 24.20.0 Linux amd64 image explicitly, then run the acceptance checks:
+Preinstall both official Node 24.20.0 Linux amd64 images explicitly. The agent uses Bookworm Slim; the fixed preparer uses Bookworm with Git 2.39.5. Build before using Docker APIs as well as the CLI:
 
 ```sh
 docker pull node@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e
+docker pull node@sha256:9137a20e25879e0b557227b57e3ee4e9af4bde29eb3db66134cd1723e84f830b
 pnpm build
 pnpm example:isolated
 ```
 
-The runner itself never pulls images. This example uses the built CLI and generated trusted repositories, not public repositories. It verifies host filesystem/network denial, credential non-inheritance and redaction, detached-child termination, budgets, cancellation, scoring, patch/artifact preservation, actual byte/inode exhaustion in `/workspace` and `/tmp`, rejected symlink and oversized exports, two isolated repetitions, resource cleanup, and byte-identical report regeneration. Each invocation preserves results under `.agent-eval/isolation-example-<uuid>`. Incomplete exports also retain their trusted temporary source, private checkout, bounded partial export, and read-only storage holder/volume for inspection. Their paths and owned resource names appear in the saved results.
+The runner itself never pulls images. This example uses the built CLI and generated trusted repositories, not public repositories. It verifies contained Git with host Git blocked, packed objects, inert source configuration, binary patch replay, rejected alternates/malformed objects, host filesystem/network denial, credential non-inheritance and redaction, detached-child termination, budgets, cancellation, scoring, patch/artifact preservation, actual byte/inode exhaustion in `/workspace` and `/tmp`, rejected symlink and oversized exports, two isolated repetitions, resource cleanup, and byte-identical report regeneration. Each invocation preserves results under `.agent-eval/isolation-example-<uuid>`. Failed preparation retains copied inputs and incomplete capture retains the relevant preparer/agent holders and quota volumes. Incomplete exports also retain their trusted temporary source, private checkout, bounded partial export, and read-only storage holder/volume for inspection. Their paths and owned resource names appear in the saved results.
 
 Add this optional field to a task or a batch's shared task to use the same backend through the existing CLI:
 
@@ -98,9 +100,26 @@ Add this optional field to a task or a batch's shared task to use the same backe
 
 Omitting `execution`, or using `{ "kind": "local" }`, keeps the trusted-worktree behavior. The Docker policy is fixed, with no network grants or provider credential broker. A stopped agent container restarts before each command and is killed afterward, including after successful commands. A separate read-only holder keeps the tmpfs mounted between commands and runs only fixed runner helpers. Files under `/workspace` persist within the attempt; agent background processes and `/tmp` contents do not. A stopped or restarted holder causes failure, not a fresh workspace or host fallback.
 
-## Live Linux storage limits
+## Contained Git preparation
 
-The `linux-container-v2` policy fixes `/workspace` at 128 MiB of allocated blocks and 12000 inodes, and `/tmp` at 64 MiB and 4096 inodes. Files, directories, and some extended attributes consume inodes. The kernel rejects further allocation with `ENOSPC`; tasks cannot raise these limits. The runner verifies Docker's local-volume options and actual tmpfs block/inode totals before importing files or starting the adapter. Sparse files can have larger logical lengths, so the stricter capture limits below remain necessary.
+Docker preparation accepts standalone SHA-1 repositories with a real `.git` directory, or bare repositories. Linked-worktree `.git` files, external alternates, symlinked object directories, hard links, and unsupported layouts fail explicitly. The controller copies opaque loose objects and pack/index files, never source config, hooks, refs, or working files. The copied snapshot and bundled worker mount read-only only in the preparer; the agent cannot reach either.
+
+| Preparation limit                      | Value                                  |
+| -------------------------------------- | -------------------------------------- |
+| Copied object-store bytes              | 256 MiB                                |
+| Individual compressed object/pack file | 128 MiB                                |
+| Object-store traversal entries         | 20000                                  |
+| JSON transfer                          | 96 MiB                                 |
+| Private preparer filesystem            | 256 MiB allocated blocks, 40000 inodes |
+| Preparer memory                        | 768 MiB, no extra container swap       |
+
+The fixed `git-preparation-v1` protocol has only prepare-at-revision and patch operations. It accepts no repository commands, Git flags, or task environment additions. The preparer uses the same offline/non-root privilege, CPU/PID, read-only-root, and temporary-filesystem restrictions as the agent. Its whole process container stops after each operation; private state persists only through its read-only-held quota volume. The controller validates returned paths, modes, base64, byte totals, and digests before accepting files.
+
+`pnpm build` produces the self-contained worker; no runtime dependency installation occurs. Missing worker assets or images fail preparation, never fall back to host Git. Result v6 records preparer image, Node/Git/Engine identity, worker/object snapshot digests, policy, and cleanup. Failed preparation retains copied inputs; incomplete capture retains the relevant holders and volumes. Host copying is bounded but not atomic against concurrent mutation. Copied objects can contain committed secrets or unreachable history, and Docker still shares the host kernel. See [remaining security limits](docs/isolation.md#limits-that-still-matter).
+
+## Live Linux agent storage limits
+
+The `linux-container-v3` policy keeps `/workspace` at 128 MiB of allocated blocks and 12000 inodes, and `/tmp` at 64 MiB and 4096 inodes. Files, directories, and some extended attributes consume inodes. The kernel rejects further allocation with `ENOSPC`; tasks cannot raise these limits. The runner verifies Docker's local-volume options and actual tmpfs block/inode totals before importing files or starting the adapter. Sparse files can have larger logical lengths, so the stricter capture limits below remain necessary.
 
 The runner exports bounded regular files through the read-only holder after stopping all agent processes. It does not unpack a daemon-provided archive or copy arbitrary sparse files to the host. Incomplete export preserves available small files and marks the patch uncaptured rather than inventing a complete patch. Successfully exported agent evidence survives later check writes and resource removal.
 
@@ -160,7 +179,7 @@ For example, a batch's `configurations` can contain:
 ]
 ```
 
-The atomic `batch-index.json` tracks each scheduled attempt as `pending`, `running`, `finished`, `not_started`, or `persistence_failed`. A finished entry names its result and SHA-256 digest. Each result is finalized before the next attempt starts. If result persistence fails, scheduling stops and the checkout is retained if the initial snapshot could not be saved. Permanent filesystem failure, SIGKILL, or power loss cannot guarantee a final result. Inspect the last index/snapshot and use `git -C <saved-workspace-path> worktree list` for retained attempts. There is no automatic recovery or resume.
+The atomic `batch-index.json` tracks each scheduled attempt as `pending`, `running`, `finished`, `not_started`, or `persistence_failed`. A finished entry names its result and SHA-256 digest. Each result is finalized before the next attempt starts. If result persistence fails, scheduling stops and the checkout is retained if the initial snapshot could not be saved. Permanent filesystem failure, SIGKILL, or power loss cannot guarantee a final result. Inspect the last index/snapshot. For retained local attempts, use `git -C <saved-workspace-path> worktree list`; Docker results identify plain host snapshots and any retained preparer/agent volumes separately. There is no automatic recovery or resume.
 
 ## Task format, version 1
 
@@ -210,7 +229,7 @@ The command budget applies only to agent commands. Each check declares whether i
 
 ## Fixed checkout and capture limits
 
-The runner owns these limits; tasks cannot raise them. Result v5 embeds the versioned policy, and it enters comparison identity.
+The runner owns these limits; tasks cannot raise them. Result v6 embeds the versioned policy, and it enters comparison identity.
 
 | Limit                     | Value                                                               |
 | ------------------------- | ------------------------------------------------------------------- |
@@ -225,21 +244,21 @@ The runner owns these limits; tasks cannot raise them. Result v5 embeds the vers
 
 Traversal uses directory iteration and bounded descriptor reads. It rejects links, special files, hard links, metadata paths, case collisions, non-NFC names, control characters, Windows reserved names, and short-name-like aliases. Reads stop at their byte limit even if a file grows after its initial size check. Oversized patches are rejected, never silently truncated. A failed capture preserves available command output and smaller artifacts, keeps the original agent outcome, and retains the checkout/export.
 
-These are logical snapshot/capture limits, separate from the Linux allocated-byte/inode quotas. Local commands can still exhaust host storage. Host preparation, private Git objects, saved results, and retained exports are not on a quota-enforced filesystem. Phase deadlines bound Git subprocesses and checkpoint filesystem operations; they cannot preempt a stalled kernel filesystem call or guarantee a hard total run duration.
+These are logical snapshot/capture limits, separate from the Linux allocated-byte/inode quotas. Local commands can still exhaust host storage. Copied object snapshots, validated host files, local private Git objects, saved results, and retained exports have no hard host filesystem quota. Docker private Git state is quota-limited in the preparer. Phase deadlines bound Git subprocesses and checkpoint filesystem operations; they cannot preempt a stalled kernel filesystem call or guarantee a hard total run duration.
 
 ## Result and report formats
 
 | Format         | Current schema                                                   |
 | -------------- | ---------------------------------------------------------------- |
 | Task v1        | [task-v1.schema.json](schemas/task-v1.schema.json)               |
-| Result v5      | [result-v5.schema.json](schemas/result-v5.schema.json)           |
+| Result v6      | [result-v6.schema.json](schemas/result-v6.schema.json)           |
 | Batch v1       | [batch-v1.schema.json](schemas/batch-v1.schema.json)             |
 | Batch index v1 | [batch-index-v1.schema.json](schemas/batch-index-v1.schema.json) |
-| Comparison v4  | [comparison-v4.schema.json](schemas/comparison-v4.schema.json)   |
+| Comparison v5  | [comparison-v5.schema.json](schemas/comparison-v5.schema.json)   |
 
-The result embeds the redacted task, original task digest, requested and resolved commits, runtime and execution identity, attempt/configuration/repetition identity, usage, outcome, normalized commands, patch, declared artifacts, checks, score, ordered events, errors, and worktree cleanup state. Docker evidence also records requested image digest, resolved image ID, image architecture, container Node version, engine version, UID/GID, fixed policy, container identity, cleanup status, any retained export path, and storage volume/holder identities, quota verification, and cleanup state. Preparation failures leave unavailable fields `null`. Events are discriminated unions inferred from their schema.
+The result embeds the redacted task, original task digest, requested and resolved commits, runtime and execution identity, attempt/configuration/repetition identity, usage, outcome, normalized commands, patch, declared artifacts, checks, score, ordered events, errors, and worktree cleanup state. Docker evidence records image/runtime/policy identities and quota verification/cleanup for both the agent and preparer. Preparation adds Git version, worker/object snapshot digests, copied byte/file counts, and any retained input path. Preparation failures leave unavailable fields `null`. Events are discriminated unions inferred from their schema.
 
-Version 5 retains the fixed `safety` policy and requires Docker's `linux-container-v2` storage policy/evidence. Comparison v4 includes both. Earlier execution evidence and events remain present. Scoring stays version 2. Archived [result v1](schemas/result-v1.schema.json), [v2](schemas/result-v2.schema.json), [v3](schemas/result-v3.schema.json), [v4](schemas/result-v4.schema.json), [comparison v1](schemas/comparison-v1.schema.json), [v2](schemas/comparison-v2.schema.json), and [v3](schemas/comparison-v3.schema.json) remain unchanged. Current comparisons reject old results rather than infer missing storage identities or mix shared-task digests. There is no automatic migration.
+Version 6 retains the fixed `safety` policy and requires Docker's `linux-container-v3` evidence, including preparation. Comparison v5 includes both. Earlier events and scoring v2 remain unchanged. Archived [result v1](schemas/result-v1.schema.json), [v2](schemas/result-v2.schema.json), [v3](schemas/result-v3.schema.json), [v4](schemas/result-v4.schema.json), [v5](schemas/result-v5.schema.json), [comparison v1](schemas/comparison-v1.schema.json), [v2](schemas/comparison-v2.schema.json), [v3](schemas/comparison-v3.schema.json), and [v4](schemas/comparison-v4.schema.json) remain unchanged. Current comparisons reject old results instead of inferring preparation identities. There is no automatic migration. The worker contract is generated as [preparation request v1](schemas/preparation-request-v1.schema.json) and [response v1](schemas/preparation-response-v1.schema.json).
 
 Patches and text artifacts record both persisted and original SHA-256 digests. If redaction changes content, the `redacted` field is true, the regular `sha256` covers the embedded content, and `originalSha256` identifies the pre-redaction bytes. Binary artifacts are preserved byte for byte and are not text-scanned.
 
@@ -268,9 +287,9 @@ For a given result, the runner records or embeds:
 - Effective execution and safety policy, including capture limits and raw checkout behavior
 - For Docker, requested/resolved image and runtime identity
 
-The shared comparison digest covers the resolved source path, full commit, execution policy and requested image, safety policy, prompt, effective budgets (including the artifact-size default), ordered checks/environment additions, and artifacts. It excludes task labels, `$schema`, and adapter configuration; adapter and full configured-task digests are separate. Repetitions of a configuration share these input digests but have distinct attempt identities and worktrees. Changing a source path changes comparison identity, even if its commit matches. Local and Docker attempts cannot share a comparison; explicit local execution and the omitted default have the same effective identity.
+The shared comparison digest covers the resolved source path, full commit, execution policy and requested image, fixed preparer image/policy, safety policy, prompt, effective budgets (including the artifact-size default), ordered checks/environment additions, and artifacts. It excludes task labels, `$schema`, and adapter configuration; adapter and full configured-task digests are separate. Repetitions of a configuration share these input digests but have distinct attempt identities and worktrees. Changing a source path changes comparison identity, even if its commit matches. Local and Docker attempts cannot share a comparison; explicit local execution and the omitted default have the same effective identity.
 
-The fixed example writes and checks produce the same patch/artifact content, outcomes, and scores under the same effective runtime inputs. Arbitrary fake-agent commands can still be nondeterministic. Results are not byte-identical across executions: attempt/container IDs, temporary paths, durations, operating systems, executable versions, Git configuration, filesystem behavior, and inherited local `PATH` can differ. Docker pins image bytes and records the resolved runtime, but it does not pin the host kernel, engine, CPU, Git checkout behavior, or resource contention. Local execution does not pin tool binaries. Given unchanged saved index/result bytes and the same report generator version, regenerated JSON and Markdown reports are byte-identical.
+The fixed example writes and checks produce the same patch/artifact content, outcomes, and scores under the same effective runtime inputs. Arbitrary fake-agent commands can still be nondeterministic. Results are not byte-identical across executions: attempt/container IDs, temporary paths, durations, operating systems, executable versions, Git configuration, filesystem behavior, and inherited local `PATH` can differ. Docker pins image bytes and records the resolved runtime, and the preparer pins its Git toolchain, but neither pins the host kernel, engine, CPU, or resource contention. Local execution does not pin tool binaries. Given unchanged saved index/result bytes and the same report generator version, regenerated JSON and Markdown reports are byte-identical.
 
 Digests detect mismatches against the supplied index; they are not signatures or proof that evidence is authentic. Redacted inputs cannot be fully reconstructed from their hashes, so exact replay of secret-bearing tasks requires an independently retained trusted input. Checks can also depend on external state. Repeated attempts do not imply statistical significance.
 
@@ -294,7 +313,7 @@ Real agents should wait for the remaining milestone 3 work. The current Docker b
 - Controlled network grants for provider access, with destination restrictions and no local-service access
 - A credential broker and tested redaction policy for structured and binary evidence
 - Token and cost budgets enforced outside provider processes
-- Containment of host Git object/metadata parsing and protection against concurrent host filesystem changes
+- Protection of bounded host snapshot copying against concurrent filesystem changes
 - Cross-platform containment and host/global storage accounting outside agent processes
 - Reviewed adapter toolchains and image provenance, not just digest pinning
 
