@@ -4,10 +4,11 @@ import {
   mkdir,
   readFile,
   readdir,
+  realpath,
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -214,9 +215,21 @@ describe("resource admission and preservation", () => {
 
   it("refuses altered ownership, escaping IDs, and aliased outputs into its inventory", async () => {
     const { repository, root, task } = await fixture();
-    const lease = await reserveResources(root, task, "ownership");
-    expect(relative(root, lease.storage.temporaryDirectory)).not.toMatch(
-      /^\.\./u,
+    const parentAlias = join(repository.path, "parent-alias");
+    await symlink(
+      repository.path,
+      parentAlias,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const aliasedRoot = join(parentAlias, "pool");
+    const lease = await reserveResources(aliasedRoot, task, "ownership");
+    expect(lease.storage.temporaryDirectory).toBe(
+      join(
+        await realpath(aliasedRoot),
+        "attempts",
+        lease.record.id,
+        "temporary",
+      ),
     );
     const alias = join(repository.path, "alias");
     await symlink(
