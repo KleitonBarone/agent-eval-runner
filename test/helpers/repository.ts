@@ -1,7 +1,14 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  opendir,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -43,32 +50,44 @@ export async function removeTestWorktree(
   repositoryPath: string,
   worktreePath: string,
 ): Promise<void> {
-  await execFileAsync("git", [
-    "-C",
-    repositoryPath,
-    "worktree",
-    "remove",
-    "--force",
-    worktreePath,
-  ]);
+  const root = await realpath(dirname(worktreePath));
+  if (
+    basename(worktreePath) !== "checkout" ||
+    !basename(root).startsWith("agent-eval-worktree-") ||
+    !(await retainedTestWorktrees(repositoryPath)).includes(
+      join(root, "checkout"),
+    )
+  )
+    throw new Error(`Not an owned fixture checkout: ${worktreePath}`);
+  await rm(root, { recursive: true, force: true });
 }
 
 export async function retainedTestWorktrees(
   repositoryPath: string,
 ): Promise<string[]> {
   const repositoryRoot = resolve(await realpath(repositoryPath)).toLowerCase();
-  const { stdout } = await execFileAsync("git", [
-    "-C",
-    repositoryPath,
-    "worktree",
-    "list",
-    "--porcelain",
-  ]);
-  return stdout
-    .split("\n")
-    .filter((line) => line.startsWith("worktree "))
-    .map((line) => line.slice("worktree ".length).trim())
-    .filter((path) => resolve(path).toLowerCase() !== repositoryRoot);
+  const root = await realpath(tmpdir());
+  const retained: string[] = [];
+  const directory = await opendir(root);
+  for await (const entry of directory) {
+    if (!entry.isDirectory() || !entry.name.startsWith("agent-eval-worktree-"))
+      continue;
+    const marker = await readFile(
+      join(root, entry.name, "source.json"),
+      "utf8",
+    ).catch(() => null);
+    if (marker === null) continue;
+    const value: unknown = JSON.parse(marker);
+    if (
+      typeof value === "object" &&
+      value !== null &&
+      "sourcePath" in value &&
+      typeof value.sourcePath === "string" &&
+      resolve(value.sourcePath).toLowerCase() === repositoryRoot
+    )
+      retained.push(join(root, entry.name, "checkout"));
+  }
+  return retained;
 }
 
 export async function cleanupTestRepositories(): Promise<void> {
@@ -85,6 +104,8 @@ export async function cleanupTestRepositories(): Promise<void> {
         `Refusing to remove test repository outside the temporary directory: ${target}`,
       );
     }
+    for (const checkout of await retainedTestWorktrees(repository))
+      await removeTestWorktree(repository, checkout);
     await rm(target, { recursive: true, force: true });
     repositories.delete(repository);
   }

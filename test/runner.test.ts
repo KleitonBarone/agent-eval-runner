@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { runEvaluation } from "../src/runner.js";
 import type { TaskSpec } from "../src/spec.js";
+import { SAFETY_POLICY } from "../src/safety.js";
 import {
   cleanupTestRepositories,
   createTestRepository,
@@ -299,5 +300,86 @@ describe("evaluation runner", () => {
       total: 2,
       ratio: 0.5,
     });
+  });
+
+  it("preserves output, smaller artifacts, checks, and the checkout after an oversized export", async () => {
+    const repository = await createTestRepository();
+    const base = taskFor(repository);
+    const outputPath = join(repository.path, "oversized.json");
+    const result = await runEvaluation(
+      {
+        ...base,
+        adapter: {
+          kind: "fake",
+          actions: [
+            { kind: "writeFile", path: "answer.txt", content: "answer\n" },
+            {
+              kind: "runCommand",
+              command: process.execPath,
+              args: [
+                "-e",
+                `const fs=require('node:fs');fs.closeSync(fs.openSync('large.bin','w'));fs.truncateSync('large.bin',${String(SAFETY_POLICY.fileBytes + 1)});console.log('available output')`,
+              ],
+            },
+          ],
+        },
+      },
+      { outputPath },
+    );
+    expect(result.status).toBe("failed");
+    expect(result.attempt.outcome).toBe("completed");
+    expect(result.commands[0]?.stdout).toBe("available output\n");
+    expect(result.patch.captured).toBe(false);
+    expect(result.artifacts[0]?.path).toBe("answer.txt");
+    expect(result.checks[0]?.status).toBe("passed");
+    expect(result.workspace.retained).toBe(true);
+    expect(result.errors.join(" ")).toContain("file byte limit");
+    const persisted: unknown = JSON.parse(await readFile(outputPath, "utf8"));
+    expect(persisted).toEqual(result);
+    await access(join(result.workspace.path ?? "", "large.bin"));
+  });
+
+  it("caps aggregate artifacts and still captures later smaller evidence", async () => {
+    const repository = await createTestRepository();
+    const base = taskFor(repository);
+    const bytes = SAFETY_POLICY.totalArtifactBytes / 2 + 1;
+    const result = await runEvaluation({
+      ...base,
+      budgets: { ...base.budgets, maxArtifactBytes: bytes },
+      adapter: {
+        kind: "fake",
+        actions: [
+          { kind: "writeFile", path: "answer.txt", content: "answer\n" },
+          {
+            kind: "runCommand",
+            command: process.execPath,
+            args: [
+              "-e",
+              `const fs=require('node:fs');for(const file of ['a.bin','b.bin'])fs.writeFileSync(file,Buffer.alloc(${String(bytes)},1))`,
+            ],
+          },
+        ],
+      },
+      artifacts: [
+        { path: "a.bin", mediaType: "application/octet-stream" },
+        { path: "b.bin", mediaType: "application/octet-stream" },
+        ...base.artifacts,
+      ],
+    });
+    expect(result.status).toBe("failed");
+    expect(result.attempt.outcome).toBe("completed");
+    expect(result.artifacts.map(({ path }) => path)).toEqual([
+      "a.bin",
+      "answer.txt",
+    ]);
+    expect(
+      result.artifacts.reduce(
+        (total, artifact) =>
+          total + Math.max(artifact.bytes, artifact.originalBytes),
+        0,
+      ),
+    ).toBeLessThanOrEqual(SAFETY_POLICY.totalArtifactBytes);
+    expect(result.errors.join(" ")).toContain("byte limit");
+    expect(result.workspace.retained).toBe(true);
   });
 });

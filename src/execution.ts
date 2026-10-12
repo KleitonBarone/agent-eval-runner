@@ -11,11 +11,12 @@ import {
   type ProcessResult,
 } from "./process.js";
 import type { Redactor } from "./redaction.js";
+import type { SafetyDeadline } from "./safety.js";
 
 export interface ExecutionBackend {
   readonly workspace: string;
   readonly quiescent: boolean;
-  prepare(signal?: AbortSignal): Promise<void>;
+  prepare(deadline: SafetyDeadline): Promise<void>;
   execute(request: ProcessRequest): Promise<ProcessResult>;
   writeFile(
     path: string,
@@ -23,7 +24,7 @@ export interface ExecutionBackend {
     timeoutMs: number,
     signal?: AbortSignal,
   ): Promise<"wall_clock" | "cancelled" | null>;
-  synchronize(): Promise<void>;
+  synchronize(deadline: SafetyDeadline): Promise<void>;
   dispose(): Promise<void>;
   removeWorkspace(): Promise<void>;
 }

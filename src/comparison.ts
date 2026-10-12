@@ -116,6 +116,7 @@ export function createComparison(
       runner: result.runner,
       source: result.source,
       execution: result.execution,
+      safety: result.safety,
       status: result.status,
       outcome: result.attempt.outcome,
       score: result.score,
@@ -170,7 +171,7 @@ export function createComparison(
       `Batch state is ${index.state}; some attempts may be unfinished.`,
     );
   const report: ComparisonSpec = {
-    schemaVersion: "2",
+    schemaVersion: "3",
     batchId: index.id,
     comparisonSha256: index.comparisonSha256,
     scoringVersion: "2",
@@ -321,6 +322,8 @@ export function renderMarkdown(report: ComparisonSpec): string {
         `Runtime: ${escapeMarkdown(canonicalJson(row.runner))}`,
         "",
         `Execution: ${escapeMarkdown(canonicalJson(row.execution))}`,
+        "",
+        `Safety policy: ${escapeMarkdown(canonicalJson(row.safety))}`,
         "",
         `Adapter digest: ${row.adapterSha256}`,
         "",

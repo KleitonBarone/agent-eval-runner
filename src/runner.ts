@@ -34,6 +34,7 @@ import {
 import { scoreChecks } from "./scoring.js";
 import { parseTaskSpec, type TaskSpec } from "./spec.js";
 import { fakeUsage } from "./usage.js";
+import { SAFETY_POLICY, SafetyDeadline } from "./safety.js";
 
 export interface RunEvaluationOptions {
   readonly outputPath?: string;
@@ -142,8 +143,10 @@ export async function runEvaluation(
   let attemptDurationMs = 0;
   let commandCount = 0;
   let patchContent = "";
+  let redactedPatch = "";
   let patchCaptured = false;
-  let retainIsolationWorkspace = false;
+  let retainWorkspace = false;
+  const preparationDeadline = new SafetyDeadline(undefined, options.signal);
 
   if (options.signal?.aborted === true) {
     attemptOutcome = "cancelled";
@@ -152,12 +155,15 @@ export async function runEvaluation(
       checkout = await prepareCheckout(
         task.repository.path,
         task.repository.revision,
+        preparationDeadline,
       );
       recorder.record({
         type: "checkout.prepared",
         revision: checkout.revision,
       });
     } catch (error) {
+      if (preparationDeadline.signal?.aborted === true)
+        attemptOutcome = "cancelled";
       addError("checkout", error);
     }
   }
@@ -170,7 +176,7 @@ export async function runEvaluation(
       redact,
     );
     try {
-      await backend.prepare(options.signal);
+      await backend.prepare(preparationDeadline);
       executionPrepared = true;
       recorder.record({
         type: "execution.prepared",
@@ -270,18 +276,26 @@ export async function runEvaluation(
       recorder.record({ type: "agent.finished", outcome: attemptOutcome });
     }
 
+    // Cancellation stops execution, not the collection of surviving evidence.
+    const captureDeadline = new SafetyDeadline();
     try {
-      await executor.synchronize();
-      patchContent = await capturePatch(workspace);
+      await executor.synchronize(captureDeadline);
+      const capturedPatch = await capturePatch(checkout, captureDeadline);
+      const sanitizedPatch = redact(capturedPatch);
+      if (Buffer.byteLength(sanitizedPatch) > SAFETY_POLICY.patchBytes)
+        throw new Error("Redacted patch byte limit exceeded");
+      patchContent = capturedPatch;
+      redactedPatch = sanitizedPatch;
       patchCaptured = true;
       recorder.record({
         type: "patch.captured",
         bytes: Buffer.byteLength(patchContent),
       });
     } catch (error) {
-      if (execution.kind === "docker") retainIsolationWorkspace = true;
+      retainWorkspace = true;
       addError("patch", error);
     }
+    let artifactBytes = 0;
     for (const descriptor of task.artifacts) {
       try {
         if (!executor.quiescent)
@@ -291,9 +305,14 @@ export async function runEvaluation(
         const artifact = await captureArtifact(
           executor.workspace,
           descriptor,
-          task.budgets.maxArtifactBytes ?? DEFAULT_MAX_ARTIFACT_BYTES,
+          Math.min(
+            task.budgets.maxArtifactBytes ?? DEFAULT_MAX_ARTIFACT_BYTES,
+            SAFETY_POLICY.totalArtifactBytes - artifactBytes,
+          ),
           redact,
+          captureDeadline,
         );
+        artifactBytes += Math.max(artifact.bytes, artifact.originalBytes);
         artifacts.push({ ...artifact, path: redact(artifact.path) });
         recorder.record({
           type: "artifact.captured",
@@ -301,7 +320,7 @@ export async function runEvaluation(
           bytes: artifact.bytes,
         });
       } catch (error) {
-        if (execution.kind === "docker") retainIsolationWorkspace = true;
+        retainWorkspace = true;
         addError("artifact", error);
       }
     }
@@ -409,14 +428,14 @@ export async function runEvaluation(
         errors.length === 0
       ? "succeeded"
       : "failed";
-  const redactedPatch = redact(patchContent);
   const result: ResultSpec = {
-    $schema: "https://agent-eval-runner.dev/schemas/result-v3.schema.json",
-    schemaVersion: "3",
+    $schema: "https://agent-eval-runner.dev/schemas/result-v4.schema.json",
+    schemaVersion: "4",
+    safety: { ...SAFETY_POLICY },
     execution,
     runner: {
       name: "agent-eval-runner",
-      version: "0.3.0",
+      version: "0.4.0",
       node: process.version,
       platform: process.platform,
       arch: process.arch,
@@ -469,7 +488,7 @@ export async function runEvaluation(
   if (
     checkout !== undefined &&
     options.keepWorktree !== true &&
-    !retainIsolationWorkspace
+    !retainWorkspace
   ) {
     try {
       await backend?.removeWorkspace();

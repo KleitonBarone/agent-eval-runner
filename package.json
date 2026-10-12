@@ -1,6 +1,6 @@
 {
   "name": "agent-eval-runner",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "Run reproducible local coding-agent evaluations and preserve their evidence.",
   "type": "module",

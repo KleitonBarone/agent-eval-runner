@@ -5,6 +5,7 @@ import { RunEventSchema } from "./events.js";
 import { ExecutionEvidenceSchema } from "./execution-spec.js";
 import { TaskSpecSchema } from "./spec.js";
 import { UsageSchema } from "./usage.js";
+import { SafetyPolicySchema } from "./safety.js";
 
 const NullableString = Type.Union([Type.String(), Type.Null()]);
 const Termination = Type.Union([
@@ -71,7 +72,8 @@ export const CheckResultSchema = Type.Union([
 export const ResultSpecSchema = Type.Object(
   {
     $schema: Type.Optional(Type.String()),
-    schemaVersion: Type.Literal("3"),
+    schemaVersion: Type.Literal("4"),
+    safety: SafetyPolicySchema,
     execution: ExecutionEvidenceSchema,
     runner: Type.Object(
       {
@@ -174,7 +176,7 @@ export const ResultSpecSchema = Type.Object(
     ),
   },
   {
-    $id: "https://agent-eval-runner.dev/schemas/result-v3.schema.json",
+    $id: "https://agent-eval-runner.dev/schemas/result-v4.schema.json",
     additionalProperties: false,
   },
 );
@@ -197,10 +199,10 @@ export function parseResultSpec(input: unknown): ResultSpec {
     typeof input === "object" &&
     input !== null &&
     "schemaVersion" in input &&
-    input.schemaVersion !== "3"
+    input.schemaVersion !== "4"
   ) {
     throw new Error(
-      "Unsupported result version. Comparisons require result version 3.",
+      "Unsupported result version. Comparisons require result version 4.",
     );
   }
   assertResultSpec(input);

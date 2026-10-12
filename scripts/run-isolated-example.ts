@@ -18,6 +18,7 @@ import { readComparison, writeComparison } from "../src/comparison.js";
 import { runBatch } from "../src/batch.js";
 import { parseResultSpec, type ResultSpec } from "../src/result.js";
 import { writeJsonAtomic } from "../src/persistence.js";
+import { SAFETY_POLICY } from "../src/safety.js";
 import { runEvaluation } from "../src/runner.js";
 import type { TaskSpec } from "../src/spec.js";
 import {
@@ -62,7 +63,6 @@ const address = listener.address();
 if (address === null || typeof address === "string")
   throw new Error("Missing test listener address");
 const results: ResultSpec[] = [];
-let retainFixtures = false;
 
 async function savedAttempt(
   task: TaskSpec,
@@ -97,7 +97,10 @@ async function savedAttempt(
     });
   }
   const raw: unknown = JSON.parse(await readFile(path, "utf8"));
+  // Keep source metadata whenever any saved attempt needs forensic inspection.
+  results.push(result);
   assert.deepEqual(parseResultSpec(raw), result);
+  assert.deepEqual(result.safety, SAFETY_POLICY);
   assert.equal(result.execution.kind, "docker");
   assert.equal(result.execution.cleanup, "removed");
   assert.match(result.execution.imageId ?? "", /^sha256:[0-9a-f]{64}$/u);
@@ -124,7 +127,6 @@ async function savedAttempt(
       eventTypes.indexOf("patch.captured") <
         eventTypes.indexOf("check.started"),
     );
-  results.push(result);
   process.stderr.write(`Finalized isolated ${label}: ${result.status}\n`);
   return result;
 }
@@ -379,6 +381,34 @@ try {
   assert.equal(cancelled.artifacts.length, 1);
   assert.match(cancelled.commands[0].stdout, /before-cancel/u);
 
+  const oversizedExport = await savedAttempt(
+    {
+      ...base,
+      adapter: {
+        kind: "fake",
+        actions: [
+          ...base.adapter.actions,
+          {
+            kind: "runCommand",
+            command: "node",
+            args: [
+              "-e",
+              `const fs=require('node:fs');fs.closeSync(fs.openSync('large.bin','w'));fs.truncateSync('large.bin',${String(SAFETY_POLICY.fileBytes + 1)});console.log('export-over-limit')`,
+            ],
+          },
+        ],
+      },
+    },
+    "oversized-export",
+  );
+  assert.equal(oversizedExport.status, "failed");
+  assert.equal(oversizedExport.attempt.outcome, "completed");
+  assert.equal(oversizedExport.commands[0]?.stdout, "export-over-limit\n");
+  assert.equal(oversizedExport.patch.captured, false);
+  assert.equal(oversizedExport.artifacts.length, 1);
+  assert.equal(oversizedExport.workspace.retained, true);
+  assert.match(oversizedExport.errors.join("\n"), /file byte limit/u);
+
   const unsafeExport = await savedAttempt(
     {
       ...base,
@@ -403,8 +433,6 @@ try {
     },
     "rejected-export",
   );
-  // Preserve the source metadata too, so the retained checkout remains inspectable.
-  retainFixtures = unsafeExport.workspace.retained;
   assert.equal(unsafeExport.status, "failed");
   assert.equal(unsafeExport.attempt.outcome, "completed");
   assert.equal(unsafeExport.patch.captured, false);
@@ -417,7 +445,7 @@ try {
     JSON.stringify(unsafeExport).includes("host-only-sentinel"),
     false,
   );
-  assert.match(unsafeExport.errors.join("\n"), /only regular files.*outside/su);
+  assert.match(unsafeExport.errors.join("\n"), /single-link regular files/su);
 
   const batchDirectory = join(output, "batch");
   const { adapter, ...shared } = base;
@@ -473,7 +501,8 @@ try {
       else reject(error);
     });
   });
-  if (!retainFixtures) await cleanupTestRepositories();
+  if (!results.some(({ workspace }) => workspace.retained))
+    await cleanupTestRepositories();
   if (originalTmpdir === undefined) delete process.env["TMPDIR"];
   else process.env["TMPDIR"] = originalTmpdir;
   if (originalSecret === undefined)

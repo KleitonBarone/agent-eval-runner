@@ -1,13 +1,5 @@
 import { randomUUID } from "node:crypto";
-import {
-  cp,
-  lstat,
-  mkdir,
-  mkdtemp,
-  readdir,
-  realpath,
-  rm,
-} from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, relative, sep } from "node:path";
 
@@ -16,7 +8,7 @@ import { Value } from "@sinclair/typebox/value";
 
 import type { ExecutionBackend } from "./execution.js";
 import { CONTAINER_POLICY, type ExecutionEvidence } from "./execution-spec.js";
-import type { PreparedCheckout } from "./git.js";
+import { assertCheckoutRoot, type PreparedCheckout } from "./git.js";
 import { resolveInside } from "./paths.js";
 import {
   runProcess,
@@ -24,6 +16,8 @@ import {
   type ProcessResult,
 } from "./process.js";
 import type { Redactor } from "./redaction.js";
+import { SafetyDeadline } from "./safety.js";
+import { copyWorkspaceFiles, scanWorkspace } from "./workspace.js";
 
 type DockerEvidence = Extract<ExecutionEvidence, { kind: "docker" }>;
 const CONTROL_TIMEOUT_MS = 10_000;
@@ -154,19 +148,6 @@ export function containerCreateArguments(
   ];
 }
 
-async function validateTree(root: string, skipGit = false): Promise<void> {
-  for (const entry of await readdir(root, { withFileTypes: true })) {
-    if (skipGit && entry.name === ".git") continue;
-    const path = join(root, entry.name);
-    const metadata = await lstat(path);
-    if (metadata.isDirectory()) await validateTree(path);
-    else if (!metadata.isFile())
-      throw new Error(
-        `Container workspace accepts only regular files and directories: ${path}`,
-      );
-  }
-}
-
 async function assertDisposable(path: string, prefix: string): Promise<void> {
   const root = await realpath(tmpdir());
   const target = await realpath(path);
@@ -230,11 +211,14 @@ export class DockerExecution implements ExecutionBackend {
   async #control(
     args: readonly string[],
     signal?: AbortSignal,
+    deadline?: SafetyDeadline,
   ): Promise<string> {
-    const result = await this.#docker(
-      args,
-      signal === undefined ? {} : { signal },
-    );
+    const result = await this.#docker(args, {
+      ...(signal === undefined ? {} : { signal }),
+      ...(deadline === undefined
+        ? {}
+        : { timeoutMs: Math.min(CONTROL_TIMEOUT_MS, deadline.remainingMs()) }),
+    });
     if (
       result.exitCode !== 0 ||
       result.termination !== null ||
@@ -246,7 +230,8 @@ export class DockerExecution implements ExecutionBackend {
     return result.stdout.trim();
   }
 
-  async prepare(signal?: AbortSignal): Promise<void> {
+  async prepare(deadline = new SafetyDeadline()): Promise<void> {
+    const signal = deadline.signal;
     if (process.platform !== "linux")
       throw new Error(
         "Docker execution requires a Linux runner and local Linux Docker Engine",
@@ -261,16 +246,20 @@ export class DockerExecution implements ExecutionBackend {
     await mkdir(join(this.#root, "docker-config"));
     this.#workspace = join(this.#root, "workspace");
     this.evidence.workspacePath = this.#workspace;
-    await validateTree(this.checkout.path, true);
-    await cp(this.checkout.path, this.#workspace, {
-      recursive: true,
-      dereference: false,
-      filter: (path) => relative(this.checkout.path, path) !== ".git",
+    const files = await scanWorkspace(this.checkout.path, deadline, {
+      skipRootGit: true,
     });
+    await copyWorkspaceFiles(
+      this.checkout.path,
+      this.#workspace,
+      files,
+      deadline,
+    );
     const input: unknown = JSON.parse(
       await this.#control(
         ["image", "inspect", "--format", "{{json .}}", this.image],
         signal,
+        deadline,
       ),
     );
     if (!Value.Check(ImageInspection, input))
@@ -289,6 +278,7 @@ export class DockerExecution implements ExecutionBackend {
     this.evidence.engineVersion = await this.#control(
       ["version", "--format", "{{.Server.Version}}"],
       signal,
+      deadline,
     );
     this.evidence.containerName = this.#name;
     // Mark the generated name before create, so ambiguous create failures can be cleaned up.
@@ -303,6 +293,7 @@ export class DockerExecution implements ExecutionBackend {
         gid,
       ),
       signal,
+      deadline,
     );
     if (!/^[0-9a-f]{64}$/u.test(id))
       throw new Error("Docker returned an invalid container ID");
@@ -311,6 +302,7 @@ export class DockerExecution implements ExecutionBackend {
       await this.#control(
         ["inspect", "--format", "{{json .}}", this.#name],
         signal,
+        deadline,
       ),
     );
     assertContainerPolicy(container, this.#workspace, uid, gid, input.Id);
@@ -318,7 +310,7 @@ export class DockerExecution implements ExecutionBackend {
       command: "/usr/local/bin/node",
       args: ["-p", "process.version"],
       cwd: this.checkout.path,
-      timeoutMs: CONTROL_TIMEOUT_MS,
+      timeoutMs: Math.min(CONTROL_TIMEOUT_MS, deadline.remainingMs()),
       timeoutTermination: "check_timeout",
       maxOutputBytes: 1024,
       ...(signal === undefined ? {} : { signal }),
@@ -489,15 +481,15 @@ export class DockerExecution implements ExecutionBackend {
     return null;
   }
 
-  async synchronize(): Promise<void> {
+  async synchronize(deadline = new SafetyDeadline()): Promise<void> {
     if (this.#workspace === undefined) return;
     if (!this.#quiescent)
       throw new Error(
         "Cannot capture a workspace with running container processes",
       );
     // The container is stopped before traversal. Reject links and special files.
-    await validateTree(this.#workspace);
-    await assertDisposable(this.checkout.path, "agent-eval-worktree-");
+    const files = await scanWorkspace(this.#workspace, deadline);
+    await assertCheckoutRoot(this.checkout);
     for (const entry of await readdir(this.checkout.path)) {
       if (entry !== ".git")
         await rm(join(this.checkout.path, entry), {
@@ -505,11 +497,12 @@ export class DockerExecution implements ExecutionBackend {
           force: true,
         });
     }
-    await cp(this.#workspace, this.checkout.path, {
-      recursive: true,
-      dereference: false,
-      filter: (path) => relative(this.#workspace ?? "", path) !== ".git",
-    });
+    await copyWorkspaceFiles(
+      this.#workspace,
+      this.checkout.path,
+      files,
+      deadline,
+    );
   }
 
   async dispose(): Promise<void> {

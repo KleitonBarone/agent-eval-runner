@@ -110,11 +110,20 @@ describe("saved-result comparisons", () => {
       }),
     ).toThrow("Execution identity");
     expect(() => parseResultSpec({ ...result, schemaVersion: "1" })).toThrow(
-      "require result version 3",
+      "require result version 4",
     );
     expect(() => parseResultSpec({ ...result, schemaVersion: "2" })).toThrow(
-      "require result version 3",
+      "require result version 4",
     );
+    expect(() => parseResultSpec({ ...result, schemaVersion: "3" })).toThrow(
+      "require result version 4",
+    );
+    expect(() =>
+      parseResultSpec({
+        ...result,
+        safety: { ...result.safety, workspaceBytes: 1 },
+      }),
+    ).toThrow("invalid result");
   });
 
   it("compares container runtimes without treating generated container IDs as runtime differences", async () => {

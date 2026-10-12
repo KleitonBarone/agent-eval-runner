@@ -1,0 +1,911 @@
+{
+  "$id": "https://agent-eval-runner.dev/schemas/result-v4.schema.json",
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "safety",
+    "execution",
+    "runner",
+    "task",
+    "taskSha256",
+    "comparisonSha256",
+    "adapterSha256",
+    "usage",
+    "status",
+    "source",
+    "attempt",
+    "commands",
+    "patch",
+    "artifacts",
+    "checks",
+    "score",
+    "events",
+    "errors",
+    "workspace"
+  ],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schemaVersion": { "const": "4", "type": "string" },
+    "safety": {
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "version",
+        "checkout",
+        "patch",
+        "workspaceBytes",
+        "fileBytes",
+        "workspaceEntries",
+        "pathDepth",
+        "patchBytes",
+        "totalArtifactBytes",
+        "gitMetadataBytes",
+        "phaseTimeoutMs"
+      ],
+      "properties": {
+        "version": {
+          "const": "raw-git-and-bounded-capture-v1",
+          "type": "string"
+        },
+        "checkout": { "const": "raw_blobs", "type": "string" },
+        "patch": { "const": "all_regular_files", "type": "string" },
+        "workspaceBytes": { "const": 67108864, "type": "number" },
+        "fileBytes": { "const": 16777216, "type": "number" },
+        "workspaceEntries": { "const": 10000, "type": "number" },
+        "pathDepth": { "const": 32, "type": "number" },
+        "patchBytes": { "const": 8388608, "type": "number" },
+        "totalArtifactBytes": { "const": 8388608, "type": "number" },
+        "gitMetadataBytes": { "const": 2097152, "type": "number" },
+        "phaseTimeoutMs": { "const": 30000, "type": "number" }
+      }
+    },
+    "execution": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "type": "object",
+          "required": ["kind", "policyVersion"],
+          "properties": {
+            "kind": { "const": "local", "type": "string" },
+            "policyVersion": {
+              "const": "trusted-worktree-v1",
+              "type": "string"
+            }
+          }
+        },
+        {
+          "additionalProperties": false,
+          "type": "object",
+          "required": [
+            "kind",
+            "policyVersion",
+            "requestedImage",
+            "imageId",
+            "architecture",
+            "node",
+            "engineVersion",
+            "uid",
+            "gid",
+            "containerId",
+            "containerName",
+            "cleanup",
+            "workspacePath",
+            "policy"
+          ],
+          "properties": {
+            "kind": { "const": "docker", "type": "string" },
+            "policyVersion": {
+              "const": "linux-container-v1",
+              "type": "string"
+            },
+            "requestedImage": { "type": "string" },
+            "imageId": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+            "architecture": {
+              "anyOf": [{ "type": "string" }, { "type": "null" }]
+            },
+            "node": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+            "engineVersion": {
+              "anyOf": [{ "type": "string" }, { "type": "null" }]
+            },
+            "uid": {
+              "anyOf": [{ "minimum": 1, "type": "integer" }, { "type": "null" }]
+            },
+            "gid": {
+              "anyOf": [{ "minimum": 0, "type": "integer" }, { "type": "null" }]
+            },
+            "containerId": {
+              "anyOf": [{ "type": "string" }, { "type": "null" }]
+            },
+            "containerName": {
+              "anyOf": [{ "type": "string" }, { "type": "null" }]
+            },
+            "cleanup": {
+              "anyOf": [
+                { "const": "not_created", "type": "string" },
+                { "const": "pending", "type": "string" },
+                { "const": "removed", "type": "string" },
+                { "const": "failed", "type": "string" }
+              ]
+            },
+            "workspacePath": {
+              "anyOf": [{ "type": "string" }, { "type": "null" }]
+            },
+            "policy": {
+              "additionalProperties": false,
+              "type": "object",
+              "required": [
+                "network",
+                "readOnlyRoot",
+                "capabilities",
+                "noNewPrivileges",
+                "memoryBytes",
+                "cpus",
+                "pids",
+                "temporaryBytes",
+                "sourceMetadata",
+                "hostCredentials",
+                "dockerSocket",
+                "commandLifecycle"
+              ],
+              "properties": {
+                "network": { "const": "none", "type": "string" },
+                "readOnlyRoot": { "const": true, "type": "boolean" },
+                "capabilities": { "const": "none", "type": "string" },
+                "noNewPrivileges": { "const": true, "type": "boolean" },
+                "memoryBytes": { "const": 536870912, "type": "number" },
+                "cpus": { "const": 1, "type": "number" },
+                "pids": { "const": 128, "type": "number" },
+                "temporaryBytes": { "const": 67108864, "type": "number" },
+                "sourceMetadata": { "const": false, "type": "boolean" },
+                "hostCredentials": { "const": false, "type": "boolean" },
+                "dockerSocket": { "const": false, "type": "boolean" },
+                "commandLifecycle": {
+                  "const": "restart_per_command",
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "runner": {
+      "additionalProperties": false,
+      "type": "object",
+      "required": ["name", "version", "node", "platform", "arch"],
+      "properties": {
+        "name": { "const": "agent-eval-runner", "type": "string" },
+        "version": { "type": "string" },
+        "node": { "type": "string" },
+        "platform": { "type": "string" },
+        "arch": { "type": "string" }
+      }
+    },
+    "task": {
+      "$id": "https://agent-eval-runner.dev/schemas/task-v1.schema.json",
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "schemaVersion",
+        "id",
+        "repository",
+        "prompt",
+        "adapter",
+        "budgets",
+        "checks",
+        "artifacts"
+      ],
+      "properties": {
+        "$schema": { "type": "string" },
+        "schemaVersion": { "const": "1", "type": "string" },
+        "id": {
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$",
+          "type": "string"
+        },
+        "repository": {
+          "additionalProperties": false,
+          "type": "object",
+          "required": ["path", "revision"],
+          "properties": {
+            "path": { "minLength": 1, "type": "string" },
+            "revision": { "pattern": "^[0-9a-fA-F]{40}$", "type": "string" }
+          }
+        },
+        "prompt": { "minLength": 1, "type": "string" },
+        "execution": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "type": "object",
+              "required": ["kind"],
+              "properties": { "kind": { "const": "local", "type": "string" } }
+            },
+            {
+              "additionalProperties": false,
+              "type": "object",
+              "required": ["kind", "image"],
+              "properties": {
+                "kind": { "const": "docker", "type": "string" },
+                "image": {
+                  "pattern": "^[a-zA-Z0-9][a-zA-Z0-9./:_-]*@sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              }
+            }
+          ]
+        },
+        "adapter": {
+          "additionalProperties": false,
+          "type": "object",
+          "required": ["kind", "actions"],
+          "properties": {
+            "kind": { "const": "fake", "type": "string" },
+            "actions": {
+              "type": "array",
+              "items": {
+                "anyOf": [
+                  {
+                    "additionalProperties": false,
+                    "type": "object",
+                    "required": ["kind", "path", "content"],
+                    "properties": {
+                      "kind": { "const": "writeFile", "type": "string" },
+                      "path": {
+                        "minLength": 1,
+                        "maxLength": 1024,
+                        "type": "string"
+                      },
+                      "content": { "type": "string" }
+                    }
+                  },
+                  {
+                    "additionalProperties": false,
+                    "type": "object",
+                    "required": ["kind", "command", "args"],
+                    "properties": {
+                      "kind": { "const": "runCommand", "type": "string" },
+                      "command": { "minLength": 1, "type": "string" },
+                      "args": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                      },
+                      "cwd": {
+                        "minLength": 1,
+                        "maxLength": 1024,
+                        "type": "string"
+                      },
+                      "env": {
+                        "type": "object",
+                        "patternProperties": { "^(.*)$": { "type": "string" } }
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "budgets": {
+          "additionalProperties": false,
+          "type": "object",
+          "required": ["wallClockMs", "maxCommands", "maxOutputBytes"],
+          "properties": {
+            "wallClockMs": { "minimum": 1, "type": "integer" },
+            "maxCommands": { "minimum": 0, "type": "integer" },
+            "maxOutputBytes": { "minimum": 1, "type": "integer" },
+            "maxArtifactBytes": { "minimum": 1, "type": "integer" }
+          }
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "additionalProperties": false,
+            "type": "object",
+            "required": ["id", "kind", "command", "args", "timeoutMs"],
+            "properties": {
+              "id": {
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$",
+                "type": "string"
+              },
+              "kind": {
+                "anyOf": [
+                  { "const": "test", "type": "string" },
+                  { "const": "lint", "type": "string" },
+                  { "const": "custom", "type": "string" }
+                ]
+              },
+              "command": { "minLength": 1, "type": "string" },
+              "args": { "type": "array", "items": { "type": "string" } },
+              "cwd": { "minLength": 1, "maxLength": 1024, "type": "string" },
+              "env": {
+                "type": "object",
+                "patternProperties": { "^(.*)$": { "type": "string" } }
+              },
+              "timeoutMs": { "minimum": 1, "type": "integer" }
+            }
+          }
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "additionalProperties": false,
+            "type": "object",
+            "required": ["path", "mediaType"],
+            "properties": {
+              "path": { "minLength": 1, "maxLength": 1024, "type": "string" },
+              "mediaType": { "minLength": 1, "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "taskSha256": { "pattern": "^[0-9a-f]{64}$", "type": "string" },
+    "comparisonSha256": { "pattern": "^[0-9a-f]{64}$", "type": "string" },
+    "adapterSha256": { "pattern": "^[0-9a-f]{64}$", "type": "string" },
+    "usage": {
+      "additionalProperties": false,
+      "type": "object",
+      "required": ["modelTokens", "modelCostUsd"],
+      "properties": {
+        "modelTokens": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "type": "object",
+              "required": ["status", "source", "value"],
+              "properties": {
+                "status": { "const": "known", "type": "string" },
+                "source": {
+                  "anyOf": [
+                    { "const": "measured", "type": "string" },
+                    { "const": "not_applicable", "type": "string" }
+                  ]
+                },
+                "value": { "minimum": 0, "type": "integer" }
+              }
+            },
+            {
+              "additionalProperties": false,
+              "type": "object",
+              "required": ["status", "reason"],
+              "properties": {
+                "status": { "const": "unknown", "type": "string" },
+                "reason": { "minLength": 1, "type": "string" }
+              }
+            }
+          ]
+        },
+        "modelCostUsd": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "type": "object",
+              "required": ["status", "source", "value"],
+              "properties": {
+                "status": { "const": "known", "type": "string" },
+                "source": {
+                  "anyOf": [
+                    { "const": "measured", "type": "string" },
+                    { "const": "not_applicable", "type": "string" }
+                  ]
+                },
+                "value": { "minimum": 0, "type": "number" }
+              }
+            },
+            {
+              "additionalProperties": false,
+              "type": "object",
+              "required": ["status", "reason"],
+              "properties": {
+                "status": { "const": "unknown", "type": "string" },
+                "reason": { "minLength": 1, "type": "string" }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "status": {
+      "anyOf": [
+        { "const": "succeeded", "type": "string" },
+        { "const": "failed", "type": "string" },
+        { "const": "interrupted", "type": "string" }
+      ]
+    },
+    "source": {
+      "additionalProperties": false,
+      "type": "object",
+      "required": ["repositoryPath", "requestedRevision", "resolvedRevision"],
+      "properties": {
+        "repositoryPath": { "type": "string" },
+        "requestedRevision": { "type": "string" },
+        "resolvedRevision": {
+          "anyOf": [{ "type": "string" }, { "type": "null" }]
+        }
+      }
+    },
+    "attempt": {
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "id",
+        "configurationId",
+        "repetition",
+        "adapter",
+        "outcome",
+        "durationMs",
+        "commandCount"
+      ],
+      "properties": {
+        "id": { "minLength": 1, "type": "string" },
+        "configurationId": { "minLength": 1, "type": "string" },
+        "repetition": { "minimum": 1, "type": "integer" },
+        "adapter": { "const": "fake", "type": "string" },
+        "outcome": {
+          "anyOf": [
+            { "const": "completed", "type": "string" },
+            { "const": "agent_failed", "type": "string" },
+            { "const": "command_budget_exceeded", "type": "string" },
+            { "const": "wall_clock_exceeded", "type": "string" },
+            { "const": "cancelled", "type": "string" },
+            { "const": "runner_error", "type": "string" }
+          ]
+        },
+        "durationMs": { "minimum": 0, "type": "number" },
+        "commandCount": { "minimum": 0, "type": "integer" }
+      }
+    },
+    "commands": {
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "command",
+          "args",
+          "cwd",
+          "exitCode",
+          "signal",
+          "stdout",
+          "stderr",
+          "stdoutTruncated",
+          "stderrTruncated",
+          "durationMs",
+          "termination",
+          "error"
+        ],
+        "properties": {
+          "id": { "type": "string" },
+          "command": { "type": "string" },
+          "args": { "type": "array", "items": { "type": "string" } },
+          "cwd": { "type": "string" },
+          "exitCode": { "anyOf": [{ "type": "integer" }, { "type": "null" }] },
+          "signal": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+          "stdout": { "type": "string" },
+          "stderr": { "type": "string" },
+          "stdoutTruncated": { "type": "boolean" },
+          "stderrTruncated": { "type": "boolean" },
+          "durationMs": { "minimum": 0, "type": "number" },
+          "termination": {
+            "anyOf": [
+              { "const": "wall_clock", "type": "string" },
+              { "const": "check_timeout", "type": "string" },
+              { "const": "cancelled", "type": "string" },
+              { "type": "null" }
+            ]
+          },
+          "error": { "anyOf": [{ "type": "string" }, { "type": "null" }] }
+        }
+      }
+    },
+    "patch": {
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "captured",
+        "bytes",
+        "originalBytes",
+        "sha256",
+        "originalSha256",
+        "redacted",
+        "content"
+      ],
+      "properties": {
+        "captured": { "type": "boolean" },
+        "bytes": { "minimum": 0, "type": "integer" },
+        "originalBytes": { "minimum": 0, "type": "integer" },
+        "sha256": { "pattern": "^[0-9a-f]{64}$", "type": "string" },
+        "originalSha256": { "pattern": "^[0-9a-f]{64}$", "type": "string" },
+        "redacted": { "type": "boolean" },
+        "content": { "type": "string" }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "path",
+          "mediaType",
+          "bytes",
+          "originalBytes",
+          "sha256",
+          "originalSha256",
+          "redacted",
+          "contentBase64"
+        ],
+        "properties": {
+          "path": { "type": "string" },
+          "mediaType": { "type": "string" },
+          "bytes": { "minimum": 0, "type": "integer" },
+          "originalBytes": { "minimum": 0, "type": "integer" },
+          "sha256": { "pattern": "^[0-9a-f]{64}$", "type": "string" },
+          "originalSha256": { "pattern": "^[0-9a-f]{64}$", "type": "string" },
+          "redacted": { "type": "boolean" },
+          "contentBase64": { "type": "string" }
+        }
+      }
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "anyOf": [
+          {
+            "additionalProperties": false,
+            "type": "object",
+            "required": ["id", "kind", "status", "command"],
+            "properties": {
+              "id": { "type": "string" },
+              "kind": {
+                "anyOf": [
+                  { "const": "test", "type": "string" },
+                  { "const": "lint", "type": "string" },
+                  { "const": "custom", "type": "string" }
+                ]
+              },
+              "status": {
+                "anyOf": [
+                  { "const": "passed", "type": "string" },
+                  { "const": "failed", "type": "string" }
+                ]
+              },
+              "command": {
+                "additionalProperties": false,
+                "type": "object",
+                "required": [
+                  "id",
+                  "command",
+                  "args",
+                  "cwd",
+                  "exitCode",
+                  "signal",
+                  "stdout",
+                  "stderr",
+                  "stdoutTruncated",
+                  "stderrTruncated",
+                  "durationMs",
+                  "termination",
+                  "error"
+                ],
+                "properties": {
+                  "id": { "type": "string" },
+                  "command": { "type": "string" },
+                  "args": { "type": "array", "items": { "type": "string" } },
+                  "cwd": { "type": "string" },
+                  "exitCode": {
+                    "anyOf": [{ "type": "integer" }, { "type": "null" }]
+                  },
+                  "signal": {
+                    "anyOf": [{ "type": "string" }, { "type": "null" }]
+                  },
+                  "stdout": { "type": "string" },
+                  "stderr": { "type": "string" },
+                  "stdoutTruncated": { "type": "boolean" },
+                  "stderrTruncated": { "type": "boolean" },
+                  "durationMs": { "minimum": 0, "type": "number" },
+                  "termination": {
+                    "anyOf": [
+                      { "const": "wall_clock", "type": "string" },
+                      { "const": "check_timeout", "type": "string" },
+                      { "const": "cancelled", "type": "string" },
+                      { "type": "null" }
+                    ]
+                  },
+                  "error": {
+                    "anyOf": [{ "type": "string" }, { "type": "null" }]
+                  }
+                }
+              }
+            }
+          },
+          {
+            "additionalProperties": false,
+            "type": "object",
+            "required": ["id", "kind", "status", "reason", "command"],
+            "properties": {
+              "id": { "type": "string" },
+              "kind": {
+                "anyOf": [
+                  { "const": "test", "type": "string" },
+                  { "const": "lint", "type": "string" },
+                  { "const": "custom", "type": "string" }
+                ]
+              },
+              "status": { "const": "skipped", "type": "string" },
+              "reason": {
+                "anyOf": [
+                  { "const": "cancelled", "type": "string" },
+                  { "const": "wall_clock_exceeded", "type": "string" },
+                  { "const": "checkout_failed", "type": "string" },
+                  { "const": "check_error", "type": "string" },
+                  { "const": "execution_failed", "type": "string" }
+                ]
+              },
+              "command": { "type": "null" }
+            }
+          }
+        ]
+      }
+    },
+    "score": {
+      "additionalProperties": false,
+      "type": "object",
+      "required": ["version", "passed", "failed", "skipped", "total", "ratio"],
+      "properties": {
+        "version": { "const": "2", "type": "string" },
+        "passed": { "minimum": 0, "type": "integer" },
+        "failed": { "minimum": 0, "type": "integer" },
+        "skipped": { "minimum": 0, "type": "integer" },
+        "total": { "minimum": 0, "type": "integer" },
+        "ratio": {
+          "anyOf": [
+            { "minimum": 0, "maximum": 1, "type": "number" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "events": {
+      "type": "array",
+      "items": {
+        "anyOf": [
+          {
+            "additionalProperties": false,
+            "type": "object",
+            "required": ["sequence", "elapsedMs", "type"],
+            "properties": {
+              "sequence": { "minimum": 0, "type": "integer" },
+              "elapsedMs": { "minimum": 0, "type": "number" },
+              "type": { "const": "run.started", "type": "string" }
+            }
+          },
+          {
+            "additionalProperties": false,
+            "type": "object",
+            "required": [
+              "sequence",
+              "elapsedMs",
+              "type",
+              "kind",
+              "policyVersion"
+            ],
+            "properties": {
+              "sequence": { "minimum": 0, "type": "integer" },
+              "elapsedMs": { "minimum": 0, "type": "number" },
+              "type": { "const": "execution.prepared", "type": "string" },
+              "kind": {
+                "anyOf": [
+                  { "const": "local", "type": "string" },
+                  { "const": "docker", "type": "string" }
+                ]
+              },
+              "policyVersion": { "type": "string" }
+            }
+          },
+          {
+            "additionalProperties": false,
+            "type": "object",
+            "required": ["sequence", "elapsedMs", "type", "revision"],
+            "properties": {
+              "sequence": { "minimum": 0, "type": "integer" },
+              "elapsedMs": { "minimum": 0, "type": "number" },
+              "type": { "const": "checkout.prepared", "type": "string" },
+              "revision": { "type": "string" }
+            }
+          },
+          {
+            "additionalProperties": false,
+            "type": "object",
+            "required": ["sequence", "elapsedMs", "type", "adapter"],
+            "properties": {
+              "sequence": { "minimum": 0, "type": "integer" },
+              "elapsedMs": { "minimum": 0, "type": "number" },
+              "type": { "const": "agent.started", "type": "string" },
+              "adapter": { "const": "fake", "type": "string" }
+            }
+          },
+          {
+            "additionalProperties": false,
+            "type": "object",
+            "required": [
+              "sequence",
+              "elapsedMs",
+              "type",
+              "commandId",
+              "command",
+              "args"
+            ],
+            "properties": {
+              "sequence": { "minimum": 0, "type": "integer" },
+              "elapsedMs": { "minimum": 0, "type": "number" },
+              "type": { "const": "command.started", "type": "string" },
+              "commandId": { "type": "string" },
+              "command": { "type": "string" },
+              "args": { "type": "array", "items": { "type": "string" } }
+            }
+          },
+          {
+            "additionalProperties": false,
+            "type": "object",
+            "required": [
+              "sequence",
+              "elapsedMs",
+              "type",
+              "commandId",
+              "exitCode",
+              "termination"
+            ],
+            "properties": {
+              "sequence": { "minimum": 0, "type": "integer" },
+              "elapsedMs": { "minimum": 0, "type": "number" },
+              "type": { "const": "command.finished", "type": "string" },
+              "commandId": { "type": "string" },
+              "exitCode": {
+                "anyOf": [{ "type": "integer" }, { "type": "null" }]
+              },
+              "termination": {
+                "anyOf": [{ "type": "string" }, { "type": "null" }]
+              }
+            }
+          },
+          {
+            "additionalProperties": false,
+            "type": "object",
+            "required": ["sequence", "elapsedMs", "type", "budget"],
+            "properties": {
+              "sequence": { "minimum": 0, "type": "integer" },
+              "elapsedMs": { "minimum": 0, "type": "number" },
+              "type": { "const": "budget.exceeded", "type": "string" },
+              "budget": {
+                "anyOf": [
+                  { "const": "commands", "type": "string" },
+                  { "const": "wall_clock", "type": "string" }
+                ]
+              }
+            }
+          },
+          {
+            "additionalProperties": false,
+            "type": "object",
+            "required": ["sequence", "elapsedMs", "type", "outcome"],
+            "properties": {
+              "sequence": { "minimum": 0, "type": "integer" },
+              "elapsedMs": { "minimum": 0, "type": "number" },
+              "type": { "const": "agent.finished", "type": "string" },
+              "outcome": { "type": "string" }
+            }
+          },
+          {
+            "additionalProperties": false,
+            "type": "object",
+            "required": ["sequence", "elapsedMs", "type", "bytes"],
+            "properties": {
+              "sequence": { "minimum": 0, "type": "integer" },
+              "elapsedMs": { "minimum": 0, "type": "number" },
+              "type": { "const": "patch.captured", "type": "string" },
+              "bytes": { "minimum": 0, "type": "integer" }
+            }
+          },
+          {
+            "additionalProperties": false,
+            "type": "object",
+            "required": ["sequence", "elapsedMs", "type", "path", "bytes"],
+            "properties": {
+              "sequence": { "minimum": 0, "type": "integer" },
+              "elapsedMs": { "minimum": 0, "type": "number" },
+              "type": { "const": "artifact.captured", "type": "string" },
+              "path": { "type": "string" },
+              "bytes": { "minimum": 0, "type": "integer" }
+            }
+          },
+          {
+            "additionalProperties": false,
+            "type": "object",
+            "required": ["sequence", "elapsedMs", "type", "checkId"],
+            "properties": {
+              "sequence": { "minimum": 0, "type": "integer" },
+              "elapsedMs": { "minimum": 0, "type": "number" },
+              "type": { "const": "check.started", "type": "string" },
+              "checkId": { "type": "string" }
+            }
+          },
+          {
+            "additionalProperties": false,
+            "type": "object",
+            "required": ["sequence", "elapsedMs", "type", "checkId", "status"],
+            "properties": {
+              "sequence": { "minimum": 0, "type": "integer" },
+              "elapsedMs": { "minimum": 0, "type": "number" },
+              "type": { "const": "check.finished", "type": "string" },
+              "checkId": { "type": "string" },
+              "status": {
+                "anyOf": [
+                  { "const": "passed", "type": "string" },
+                  { "const": "failed", "type": "string" }
+                ]
+              }
+            }
+          },
+          {
+            "additionalProperties": false,
+            "type": "object",
+            "required": ["sequence", "elapsedMs", "type", "checkId", "reason"],
+            "properties": {
+              "sequence": { "minimum": 0, "type": "integer" },
+              "elapsedMs": { "minimum": 0, "type": "number" },
+              "type": { "const": "check.skipped", "type": "string" },
+              "checkId": { "type": "string" },
+              "reason": { "type": "string" }
+            }
+          },
+          {
+            "additionalProperties": false,
+            "type": "object",
+            "required": ["sequence", "elapsedMs", "type", "passed", "total"],
+            "properties": {
+              "sequence": { "minimum": 0, "type": "integer" },
+              "elapsedMs": { "minimum": 0, "type": "number" },
+              "type": { "const": "score.computed", "type": "string" },
+              "passed": { "minimum": 0, "type": "integer" },
+              "total": { "minimum": 0, "type": "integer" }
+            }
+          },
+          {
+            "additionalProperties": false,
+            "type": "object",
+            "required": ["sequence", "elapsedMs", "type", "status"],
+            "properties": {
+              "sequence": { "minimum": 0, "type": "integer" },
+              "elapsedMs": { "minimum": 0, "type": "number" },
+              "type": { "const": "run.finished", "type": "string" },
+              "status": {
+                "anyOf": [
+                  { "const": "succeeded", "type": "string" },
+                  { "const": "failed", "type": "string" },
+                  { "const": "interrupted", "type": "string" }
+                ]
+              }
+            }
+          }
+        ]
+      }
+    },
+    "errors": { "type": "array", "items": { "type": "string" } },
+    "workspace": {
+      "additionalProperties": false,
+      "type": "object",
+      "required": ["retained", "path"],
+      "properties": {
+        "retained": { "type": "boolean" },
+        "path": { "anyOf": [{ "type": "string" }, { "type": "null" }] }
+      }
+    }
+  }
+}

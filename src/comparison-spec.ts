@@ -21,6 +21,7 @@ export const FinishedComparisonRowSchema = Type.Object(
     runner: ResultSpecSchema.properties.runner,
     source: ResultSpecSchema.properties.source,
     execution: ResultSpecSchema.properties.execution,
+    safety: ResultSpecSchema.properties.safety,
     status: ResultSpecSchema.properties.status,
     outcome: ResultSpecSchema.properties.attempt.properties.outcome,
     score: ResultSpecSchema.properties.score,
@@ -36,7 +37,7 @@ export const FinishedComparisonRowSchema = Type.Object(
 
 export const ComparisonSpecSchema = Type.Object(
   {
-    schemaVersion: Type.Literal("2"),
+    schemaVersion: Type.Literal("3"),
     batchId: Type.String(),
     comparisonSha256: DigestSchema,
     scoringVersion: Type.Literal("2"),
@@ -62,7 +63,7 @@ export const ComparisonSpecSchema = Type.Object(
     warnings: Type.Array(Type.String()),
   },
   {
-    $id: "https://agent-eval-runner.dev/schemas/comparison-v2.schema.json",
+    $id: "https://agent-eval-runner.dev/schemas/comparison-v3.schema.json",
     additionalProperties: false,
   },
 );

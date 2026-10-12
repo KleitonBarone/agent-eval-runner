@@ -1,6 +1,6 @@
 # Agent Eval Runner
 
-Agent Eval Runner executes coding-agent attempts at an exact Git commit and compares their saved evidence. Milestones 0, 1, and 2 are implemented. Version 0.3.0 adds an opt-in restricted Linux container backend, the first part of milestone 3. The only adapter is a deterministic fake agent for trusted local development and tests.
+Agent Eval Runner executes coding-agent attempts at an exact Git commit and compares their saved evidence. Milestones 0, 1, and 2 are implemented. Version 0.4.0 adds raw-object checkout and bounded evidence capture to the restricted Linux container backend. Milestone 3 remains incomplete. The only adapter is a deterministic fake agent for trusted local development and tests.
 
 The runner does not call model APIs. Do not use it on untrusted repositories yet.
 
@@ -18,6 +18,7 @@ The runner does not call model APIs. Do not use it on untrusted repositories yet
 - Known/unknown model usage and deterministic JSON and Markdown comparison reports
 - Basic redaction for configured secret values, bearer tokens, and common credential assignments
 - Digest-pinned Linux containers with fixed network, filesystem, privilege, and resource restrictions
+- Runner-owned Git metadata, raw blob checkout, and bounded workspace/patch/artifact capture
 
 Start with `pnpm install --frozen-lockfile`, `pnpm build`, and `pnpm example`. Docker is optional for that path.
 
@@ -35,9 +36,11 @@ Start with `pnpm install --frozen-lockfile`, `pnpm build`, and `pnpm example`. D
 
 The runtime is Node.js 22 or newer, strict TypeScript, and pnpm. Node gives the runner cross-platform process control without adding a second runtime. TypeBox defines runtime validators, TypeScript types, and the checked-in JSON Schemas from the same source.
 
-The first execution boundary is a detached Git worktree created under the operating system's temporary directory. The runner resolves the task's full commit hash, checks that Git returns the same hash, and checks out that commit. Each attempt starts fresh. Before deleting a worktree, it writes an evidence snapshot when an output path was supplied. It then writes the finalized result. It retains the worktree when `--keep-worktree` is set, initial persistence fails, or cleanup fails.
+The execution boundary is a detached Git worktree in a runner-owned temporary repository. The source supplies commit objects through a read-only Git object alternate, not its configuration or worktree metadata. Preparation validates the exact commit and tree, then materializes verified raw blob bytes. Git runs with a reduced environment, no system/global configuration, disabled hooks/fsmonitor, an empty initialization template, no lazy fetch, and no network protocols. Private attributes disable filters, line-ending conversion, ident expansion, and working-tree encoding conversion. Git LFS pointers remain pointers; submodules and symlinks are rejected, not fetched or followed.
 
-A worktree is disposable, but it is not a security sandbox. Agent and check processes retain the runner user's filesystem permissions and network access. They can reach the source repository, other local files, and local services. Git checkout filters and other local Git configuration may run during checkout. Use only repositories and commands you trust.
+Each attempt starts fresh. Its `agent-eval-worktree-<suffix>` directory holds `checkout`, private Git metadata, and the source identity. The source repository receives no worktree registration or captured blobs. Before removing the private directory, the runner saves an evidence snapshot when an output path was supplied. `--keep-worktree`, failed capture, initial persistence failure, and cleanup failure retain it. Inspect retained metadata with `git -C <saved-workspace-path> worktree list`; the source repository's worktree list no longer tracks attempts.
+
+A worktree is disposable, but it is not a security sandbox. Local agent and check processes retain the runner user's filesystem permissions and network access. They can reach the source repository, other local files, and local services. Host Git still parses source repository metadata and objects. Use only repositories and commands you trust.
 
 Setting `execution.kind` to `docker` runs fake-agent writes, commands, and checks in a Linux container. The host still prepares a worktree, but the container mounts only a separate copy without `.git`. It never receives the source repository, Docker socket, host home directory, or inherited host credentials. Unsupported systems, missing images, and preparation failures produce failed evidence; they never fall back to local execution. See [the isolation policy and threat model](docs/isolation.md) before using this backend.
 
@@ -57,7 +60,7 @@ pnpm build
 pnpm example
 ```
 
-The example resolves this repository's current commit, writes a version 1 task to `.agent-eval/example-task.json`, and runs the fake adapter in a disposable worktree. Its version 3 result is `.agent-eval/example-result.json`. Repeating this single-run example replaces those two files. The directory is ignored by Git so local evaluation evidence is not published by accident.
+The example resolves this repository's current commit, writes a version 1 task to `.agent-eval/example-task.json`, and runs the fake adapter in a disposable worktree. Its version 4 result is `.agent-eval/example-result.json`. Repeating this single-run example replaces those two files. The directory is ignored by Git so local evaluation evidence is not published by accident.
 
 After `pnpm build`, the equivalent CLI form is:
 
@@ -79,7 +82,7 @@ pnpm build
 pnpm example:isolated
 ```
 
-The runner itself never pulls images. This example uses the built CLI and generated trusted repositories, not public repositories. It verifies host filesystem/network denial, credential non-inheritance and redaction, detached-child termination, budgets, cancellation, scoring, patch/artifact preservation, rejection and retention of an unsafe export, two isolated repetitions, container cleanup, and byte-identical report regeneration. Each invocation preserves results under `.agent-eval/isolation-example-<uuid>`. The intentional unsafe-export case also retains its trusted temporary source, checkout, and export for inspection; their paths appear in the saved result.
+The runner itself never pulls images. This example uses the built CLI and generated trusted repositories, not public repositories. It verifies host filesystem/network denial, credential non-inheritance and redaction, detached-child termination, budgets, cancellation, scoring, patch/artifact preservation, rejected symlink and oversized exports, two isolated repetitions, container cleanup, and byte-identical report regeneration. Each invocation preserves results under `.agent-eval/isolation-example-<uuid>`. Rejected exports also retain their trusted temporary source, private checkout, and export for inspection; their paths appear in the saved results.
 
 Add this optional field to a task or a batch's shared task to use the same backend through the existing CLI:
 
@@ -141,7 +144,7 @@ For example, a batch's `configurations` can contain:
 ]
 ```
 
-The atomic `batch-index.json` tracks each scheduled attempt as `pending`, `running`, `finished`, `not_started`, or `persistence_failed`. A finished entry names its result and SHA-256 digest. Each result is finalized before the next attempt starts. If result persistence fails, scheduling stops and the checkout is retained if the initial snapshot could not be saved. Permanent filesystem failure, SIGKILL, or power loss cannot guarantee a final result: inspect the last index/snapshot and retained worktrees (`git worktree list`). There is no automatic recovery or resume.
+The atomic `batch-index.json` tracks each scheduled attempt as `pending`, `running`, `finished`, `not_started`, or `persistence_failed`. A finished entry names its result and SHA-256 digest. Each result is finalized before the next attempt starts. If result persistence fails, scheduling stops and the checkout is retained if the initial snapshot could not be saved. Permanent filesystem failure, SIGKILL, or power loss cannot guarantee a final result. Inspect the last index/snapshot and use `git -C <saved-workspace-path> worktree list` for retained attempts. There is no automatic recovery or resume.
 
 ## Task format, version 1
 
@@ -189,21 +192,42 @@ Task files accept only a full 40-character commit hash. Symbolic revisions such 
 
 The command budget applies only to agent commands. Each check declares whether it is a `test`, `lint`, or `custom` command. Checks have their own timeouts and do not consume the agent command budget. The wall-clock budget covers the fake-agent attempt. Each stdout and stderr stream is capped at `maxOutputBytes`; the result marks truncated streams. `maxArtifactBytes` defaults to 1 MiB when omitted.
 
+## Fixed checkout and capture limits
+
+The runner owns these limits; tasks cannot raise them. Result v4 embeds the versioned policy, and it enters comparison identity.
+
+| Limit                     | Value                                                               |
+| ------------------------- | ------------------------------------------------------------------- |
+| Source/export workspace   | 64 MiB of logical file bytes                                        |
+| Individual workspace file | 16 MiB                                                              |
+| Workspace entries         | 10000 files and directories                                         |
+| Path depth                | 32 components                                                       |
+| Patch                     | 8 MiB, before and after redaction                                   |
+| All embedded artifacts    | 8 MiB, counting the larger of original/persisted bytes per artifact |
+| Git tree/index metadata   | 2 MiB                                                               |
+| Preparation and capture   | Separate 30-second phase deadlines                                  |
+
+Traversal uses directory iteration and bounded descriptor reads. It rejects links, special files, hard links, metadata paths, case collisions, non-NFC names, control characters, Windows reserved names, and short-name-like aliases. Reads stop at their byte limit even if a file grows after its initial size check. Oversized patches are rejected, never silently truncated. A failed capture preserves available command output and smaller artifacts, keeps the original agent outcome, and retains the checkout/export.
+
+These are snapshot/capture limits, not a hard live disk quota. A running local or Docker command can still fill its writable filesystem before capture. Phase deadlines bound Git subprocesses and checkpoint filesystem operations; they cannot preempt a stalled kernel filesystem call or guarantee a hard total run duration.
+
 ## Result and report formats
 
 | Format         | Current schema                                                   |
 | -------------- | ---------------------------------------------------------------- |
 | Task v1        | [task-v1.schema.json](schemas/task-v1.schema.json)               |
-| Result v3      | [result-v3.schema.json](schemas/result-v3.schema.json)           |
+| Result v4      | [result-v4.schema.json](schemas/result-v4.schema.json)           |
 | Batch v1       | [batch-v1.schema.json](schemas/batch-v1.schema.json)             |
 | Batch index v1 | [batch-index-v1.schema.json](schemas/batch-index-v1.schema.json) |
-| Comparison v2  | [comparison-v2.schema.json](schemas/comparison-v2.schema.json)   |
+| Comparison v3  | [comparison-v3.schema.json](schemas/comparison-v3.schema.json)   |
 
 The result embeds the redacted task, original task digest, requested and resolved commits, runtime and execution identity, attempt/configuration/repetition identity, usage, outcome, normalized commands, patch, declared artifacts, checks, score, ordered events, errors, and worktree cleanup state. Docker evidence also records requested image digest, resolved image ID, image architecture, container Node version, engine version, UID/GID, fixed policy, container identity, cleanup status, and any retained export path. Preparation failures leave unavailable fields `null`. Events are discriminated unions inferred from their schema.
 
-Version 3 requires execution evidence and adds an `execution.prepared` event and `execution_failed` check skip reason. Comparison v2 includes that evidence. Scoring remains version 2. The archived [result v1](schemas/result-v1.schema.json), [result v2](schemas/result-v2.schema.json), and [comparison v1](schemas/comparison-v1.schema.json) schemas remain unchanged. Current comparisons reject old results rather than infer missing execution identities or mix old shared-task digests. There is no automatic migration.
+Version 4 requires the fixed `safety` policy, including raw checkout and capture limits. Comparison v3 includes it. Earlier execution evidence and events remain present. Scoring stays version 2. Archived [result v1](schemas/result-v1.schema.json), [v2](schemas/result-v2.schema.json), [v3](schemas/result-v3.schema.json), [comparison v1](schemas/comparison-v1.schema.json), and [v2](schemas/comparison-v2.schema.json) remain unchanged. Current comparisons reject old results rather than infer missing safety identities or mix shared-task digests. There is no automatic migration.
 
 Patches and text artifacts record both persisted and original SHA-256 digests. If redaction changes content, the `redacted` field is true, the regular `sha256` covers the embedded content, and `originalSha256` identifies the pre-redaction bytes. Binary artifacts are preserved byte for byte and are not text-scanned.
+
+Patches compare a runner-built raw-byte index against the requested commit. They include every regular workspace file, including ignored files, and disable rename detection, external diff, and textconv. They do not use agent-controlled staging or Git clean filters. This differs from v3, which excluded ignored untracked files. Executable-bit changes are recorded on Unix; Windows preserves tracked Git modes and assigns new files mode `100644`. Empty directories are not Git evidence. Replaying with another Git configuration may require `git -c core.autocrlf=false apply --binary <patch>`; replaying into a raw prepared checkout is covered by tests.
 
 Checks run after patch and artifact capture, including after an adapter exception. Their filesystem writes, if any, are not part of the agent patch. A check passes only with exit status 0, no termination, and no process error. Every declared check appears as `passed`, `failed`, or `skipped`. Skipped checks have no command and give a reason: cancellation, wall-clock exhaustion, checkout failure, execution preparation failure, or check setup error. One capture/check error does not prevent later phases or replace the adapter's original outcome.
 
@@ -225,9 +249,10 @@ For a given result, the runner records or embeds:
 - Declared artifact content, subject to documented redaction and size limits
 - Check commands and their results
 - Runner version, Node version, platform, architecture, event order, and measured durations
-- Effective execution policy and, for Docker, requested/resolved image and runtime identity
+- Effective execution and safety policy, including capture limits and raw checkout behavior
+- For Docker, requested/resolved image and runtime identity
 
-The shared comparison digest covers the resolved source path, full commit, execution policy and requested image, prompt, effective budgets (including the artifact-size default), ordered checks/environment additions, and artifacts. It excludes task labels, `$schema`, and adapter configuration; adapter and full configured-task digests are separate. Repetitions of a configuration share these input digests but have distinct attempt identities and worktrees. Changing a source path changes comparison identity, even if its commit matches. Local and Docker attempts cannot share a comparison; explicit local execution and the omitted default have the same effective identity.
+The shared comparison digest covers the resolved source path, full commit, execution policy and requested image, safety policy, prompt, effective budgets (including the artifact-size default), ordered checks/environment additions, and artifacts. It excludes task labels, `$schema`, and adapter configuration; adapter and full configured-task digests are separate. Repetitions of a configuration share these input digests but have distinct attempt identities and worktrees. Changing a source path changes comparison identity, even if its commit matches. Local and Docker attempts cannot share a comparison; explicit local execution and the omitted default have the same effective identity.
 
 The fixed example writes and checks produce the same patch/artifact content, outcomes, and scores under the same effective runtime inputs. Arbitrary fake-agent commands can still be nondeterministic. Results are not byte-identical across executions: attempt/container IDs, temporary paths, durations, operating systems, executable versions, Git configuration, filesystem behavior, and inherited local `PATH` can differ. Docker pins image bytes and records the resolved runtime, but it does not pin the host kernel, engine, CPU, Git checkout behavior, or resource contention. Local execution does not pin tool binaries. Given unchanged saved index/result bytes and the same report generator version, regenerated JSON and Markdown reports are byte-identical.
 
@@ -235,7 +260,7 @@ Digests detect mismatches against the supplied index; they are not signatures or
 
 Failed and interrupted attempts use the same result contract. Once task validation succeeds, the runner tries to capture the available patch and artifacts and persists evidence before workspace deletion. Local termination is best-effort. Docker commands stop the whole container before capture, and container-stop failures refuse further execution and unsafe capture. Failed capture retains the isolated export and original checkout for inspection. Docker cleanup removes only the generated attempt container, never unrelated containers or images.
 
-The agent wall-clock budget covers actions and command startup, not checkout, backend preparation, capture, or cleanup. Docker file writes run under that budget; local file I/O is not preemptible. Container termination and control operations can add time beyond a deadline, with each Docker control request bounded at 10 seconds. Each check has its own timeout; there is no total batch deadline or workspace disk quota. Atomic renames avoid partial JSON during normal execution but are not fsync-backed crash durability. Daemon failure, SIGKILL, power loss, or permanent storage failure cannot guarantee termination or final evidence. Invalid JSON or an invalid task cannot produce a versioned result because no valid task identity exists.
+The agent wall-clock budget covers actions and command startup, not checkout, backend preparation, capture, or cleanup. Preparation and capture have separate deadlines described above. Docker file writes run under the agent budget; local file I/O is not preemptible. Container termination and control operations can add time beyond a deadline, with each Docker control request bounded at 10 seconds. Each check has its own timeout; there is no total batch deadline or live workspace disk quota. Atomic renames avoid partial JSON during normal execution but are not fsync-backed crash durability. Daemon failure, SIGKILL, power loss, or permanent storage failure cannot guarantee termination or final evidence. Invalid JSON or an invalid task cannot produce a versioned result because no valid task identity exists.
 
 ## Credential handling
 
@@ -253,7 +278,7 @@ Real agents should wait for the remaining milestone 3 work. The current Docker b
 - Controlled network grants for provider access, with destination restrictions and no local-service access
 - A credential broker and tested redaction policy for structured and binary evidence
 - Token and cost budgets enforced outside provider processes
-- Repository checkout hardening against filters, hooks, submodules, and local Git configuration
+- Containment of host Git object/metadata parsing and protection against concurrent host filesystem changes
 - Cross-platform containment and disk/output resource accounting outside agent processes
 - Reviewed adapter toolchains and image provenance, not just digest pinning
 

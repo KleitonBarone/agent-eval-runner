@@ -18,3 +18,5 @@ export {
   ExecutionEvidenceSchema,
 } from "./execution-spec.js";
 export type { ExecutionConfig, ExecutionEvidence } from "./execution-spec.js";
+export { SafetyPolicySchema } from "./safety.js";
+export type { SafetyPolicy } from "./safety.js";
