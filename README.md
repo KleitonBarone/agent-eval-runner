@@ -1,6 +1,6 @@
 # Agent Eval Runner
 
-Agent Eval Runner executes coding-agent attempts at an exact Git commit and compares their saved evidence. Milestones 0, 1, and 2 are implemented. Version 0.6.0 moves Docker checkout and patch Git operations into a separate restricted preparer. Milestone 3 remains incomplete. The only adapter is a deterministic fake agent for trusted local development and tests.
+Agent Eval Runner executes coding-agent attempts at an exact Git commit and compares their saved evidence. Milestones 0, 1, and 2 are implemented. Version 0.7.0 adds opt-in resource-pool admission budgets and a read-only inventory to the contained Docker execution. Milestone 3 remains incomplete. The only adapter is a deterministic fake agent for trusted local development and tests.
 
 The runner does not call model APIs. Do not use it on untrusted repositories yet.
 
@@ -21,6 +21,7 @@ The runner does not call model APIs. Do not use it on untrusted repositories yet
 - Runner-owned Git metadata, raw blob checkout, and bounded workspace/patch/artifact capture
 - Live Linux tmpfs byte/inode limits, verified before any agent action
 - Contained Git parsing for Docker runs, with bounded object snapshots and a versioned worker protocol
+- Shared admission accounting for active and retained attempts, without automatic evidence deletion
 
 Start with `pnpm install --frozen-lockfile`, `pnpm build`, and `pnpm example`. Docker is optional for that path.
 
@@ -62,7 +63,7 @@ pnpm build
 pnpm example
 ```
 
-The example resolves this repository's current commit, writes a version 1 task to `.agent-eval/example-task.json`, and runs the fake adapter in a disposable worktree. Its version 6 result is `.agent-eval/example-result.json`. Repeating this single-run example replaces those two files. The directory is ignored by Git so local evaluation evidence is not published by accident.
+The example resolves this repository's current commit, writes a version 1 task to `.agent-eval/example-task.json`, and runs the fake adapter in a disposable worktree. Its version 7 result is `.agent-eval/example-result.json`. Repeating this single-run example replaces those two files. The directory is ignored by Git so local evaluation evidence is not published by accident.
 
 After `pnpm build`, the equivalent CLI form is:
 
@@ -85,7 +86,7 @@ pnpm build
 pnpm example:isolated
 ```
 
-The runner itself never pulls images. This example uses the built CLI and generated trusted repositories, not public repositories. It verifies contained Git with host Git blocked, packed objects, inert source configuration, binary patch replay, rejected alternates/malformed objects, host filesystem/network denial, credential non-inheritance and redaction, detached-child termination, budgets, cancellation, scoring, patch/artifact preservation, actual byte/inode exhaustion in `/workspace` and `/tmp`, rejected symlink and oversized exports, two isolated repetitions, resource cleanup, and byte-identical report regeneration. Each invocation preserves results under `.agent-eval/isolation-example-<uuid>`. Failed preparation retains copied inputs and incomplete capture retains the relevant preparer/agent holders and quota volumes. Incomplete exports also retain their trusted temporary source, private checkout, bounded partial export, and read-only storage holder/volume for inspection. Their paths and owned resource names appear in the saved results.
+The runner itself never pulls images. This example uses the built CLI and generated trusted repositories, not public repositories. It verifies contained Git with host Git blocked, packed objects, inert source configuration, binary patch replay, rejected alternates/malformed objects, host filesystem/network denial, credential non-inheritance and redaction, detached-child termination, budgets, cancellation, scoring, patch/artifact preservation, actual byte/inode exhaustion in `/workspace` and `/tmp`, rejected symlink and oversized exports, two isolated repetitions, resource cleanup, managed admission/cancellation/retention, read-only inventory, exhaustion refusal without evidence changes, and byte-identical report regeneration. Each invocation preserves results under `.agent-eval/isolation-example-<uuid>`. Failed preparation retains copied inputs and incomplete capture retains the relevant preparer/agent holders and quota volumes. Incomplete exports also retain their trusted temporary source, private checkout, bounded partial export, and read-only storage holder/volume for inspection. Their paths and owned resource names appear in the saved results.
 
 Add this optional field to a task or a batch's shared task to use the same backend through the existing CLI:
 
@@ -115,7 +116,7 @@ Docker preparation accepts standalone SHA-1 repositories with a real `.git` dire
 
 The fixed `git-preparation-v1` protocol has only prepare-at-revision and patch operations. It accepts no repository commands, Git flags, or task environment additions. The preparer uses the same offline/non-root privilege, CPU/PID, read-only-root, and temporary-filesystem restrictions as the agent. Its whole process container stops after each operation; private state persists only through its read-only-held quota volume. The controller validates returned paths, modes, base64, byte totals, and digests before accepting files.
 
-`pnpm build` produces the self-contained worker; no runtime dependency installation occurs. Missing worker assets or images fail preparation, never fall back to host Git. Result v6 records preparer image, Node/Git/Engine identity, worker/object snapshot digests, policy, and cleanup. Failed preparation retains copied inputs; incomplete capture retains the relevant holders and volumes. Host copying is bounded but not atomic against concurrent mutation. Copied objects can contain committed secrets or unreachable history, and Docker still shares the host kernel. See [remaining security limits](docs/isolation.md#limits-that-still-matter).
+`pnpm build` produces the self-contained worker; no runtime dependency installation occurs. Missing worker assets or images fail preparation, never fall back to host Git. Result v7 records preparer image, Node/Git/Engine identity, worker/object snapshot digests, policy, and cleanup. Failed preparation retains copied inputs; incomplete capture retains the relevant holders and volumes. Host copying is bounded but not atomic against concurrent mutation. Copied objects can contain committed secrets or unreachable history, and Docker still shares the host kernel. See [remaining security limits](docs/isolation.md#limits-that-still-matter).
 
 ## Live Linux agent storage limits
 
@@ -131,6 +132,50 @@ docker volume inspect <volume-name>
 ```
 
 Retained tmpfs data is ephemeral and consumes bounded RAM or swap until released. Removing the last mount destroys it. After inspection and saving needed evidence, verify the recorded ownership labels before removing that exact holder and volume. Never prune Docker resources. Host reboot, daemon failure, or holder termination can lose raw tmpfs contents; saved JSON and partial exports are the persisted evidence. Local execution has no live storage quota, and repeated retained attempts have no global aggregate quota.
+
+## Resource pools and admission budgets
+
+Resource-managed execution is opt-in and currently Docker-only. All cooperating runners that use the same pool share its capacity. Local execution and runs without `--resource-root` remain unmanaged. A pool does not discover or adopt legacy workspaces, unrelated Docker resources, or other pools.
+
+Create the parent directory and save a policy as `.agent-eval/resource-policy.json`:
+
+```json
+{
+  "schemaVersion": "1",
+  "limits": {
+    "poolBytes": 4294967296,
+    "poolEntries": 240000,
+    "dockerVolumeBytes": 1073741824,
+    "dockerContainers": 8,
+    "dockerVolumes": 4,
+    "records": 100
+  }
+}
+```
+
+Build first, then initialize a new pool and run a user-supplied trusted Docker task:
+
+```sh
+node dist/cli.js resources-init --root .agent-eval/resource-pool --policy .agent-eval/resource-policy.json
+node dist/cli.js run --task task.json --output .agent-eval/managed-result.json --resource-root .agent-eval/resource-pool
+node dist/cli.js inventory --root .agent-eval/resource-pool
+```
+
+`batch` accepts the same `--resource-root` flag. The policy is validated by [resource policy v1](schemas/resource-policy-v1.schema.json). Initialization refuses an existing directory. API callers use `createResourcePool` and `runEvaluation/runBatch` with `resourceRoot`.
+
+Before any checkout or Docker creation, admission writes a persisted reservation and planned resource names. An exclusive file lock prevents cooperating processes from oversubscribing the recorded budget; contention is refused without implicit retries. Each attempt reserves 768 MiB of logical pool-file capacity, 60000 entries, 384 MiB of Docker workspace-volume capacity, four containers, two volumes, and one lifetime inventory record. The pool separately charges 20 MiB/32 entries for metadata and atomic-write overhead.
+
+Managed task input is capped at 1 MiB, with at most 1000 actions and 1000 checks. A conservative preflight checks configured output budgets against a 128 MiB serialized-result cap. Redacted command streams stay within their configured byte cap and record `outputDigests` for bounded original capture and persisted text. Digests cover the captured prefix, not bytes discarded by raw output truncation.
+
+Checkout inputs, host exports, controller directories, and a canonical result live under `attempts/<reservation-id>`. The runner saves the canonical result before checkout deletion. The caller's `--output` or batch directory is a mirror outside the pool, is not charged, and cannot alias protected pool files. Do not use mirrors to claim a host-wide storage limit.
+
+Successful resource cleanup releases Docker charges; complete attempts retain measured logical host-file charges and their lifetime record. Failed/interrupted capture, ambiguous cleanup/persistence, and unfinished attempts retain conservative charges and available evidence. An exited PID is never proof that its resources can be reclaimed. Stale locks, unknown storage, altered ownership, or changed finalized result bytes block admission rather than trigger deletion.
+
+`inventory` emits [inventory v1](schemas/resource-inventory-v1.schema.json) from [ledger v1](schemas/resource-ledger-v1.schema.json), without writing state or probing/deleting Docker resources. Its measurements and cleanup statuses are recorded observations, not a fresh live Docker ownership attestation. There is no automatic reclamation, lock breaking, repair, or resume.
+
+A standalone admission refusal emits [decision v1](schemas/resource-admission-v1.schema.json) and starts no attempt. Capacity refusal exits 1, cancellation exits 130, and other admission errors exit 2. Batches stop scheduling and mark refused/later entries `not_started` with `resource_admission`; earlier results remain finalized.
+
+These are cooperative, per-pool accounting budgets, not kernel-enforced host quotas or physical free-space reservations. Block rounding, concurrent host mutation, caller mirrors, image storage, other pools, and unrelated processes are outside this accounting. Host `ENOSPC`, daemon failure, or power loss can still prevent final persistence. Retained tmpfs data remains ephemeral. Hard filesystem quotas and aggregate host enforcement remain security work.
 
 ## Run and compare a batch
 
@@ -225,11 +270,11 @@ Task files accept only a full 40-character commit hash. Symbolic revisions such 
 }
 ```
 
-The command budget applies only to agent commands. Each check declares whether it is a `test`, `lint`, or `custom` command. Checks have their own timeouts and do not consume the agent command budget. The wall-clock budget covers the fake-agent attempt. Each stdout and stderr stream is capped at `maxOutputBytes`; the result marks truncated streams. `maxArtifactBytes` defaults to 1 MiB when omitted.
+The command budget applies only to agent commands. Each check declares whether it is a `test`, `lint`, or `custom` command. Checks have their own timeouts and do not consume the agent command budget. The wall-clock budget covers the fake-agent attempt. Each raw stdout and stderr capture is capped at `maxOutputBytes`; managed execution also caps the redacted persisted text at that limit, while unmanaged redaction can expand it; the result marks truncated streams. `maxArtifactBytes` defaults to 1 MiB when omitted.
 
 ## Fixed checkout and capture limits
 
-The runner owns these limits; tasks cannot raise them. Result v6 embeds the versioned policy, and it enters comparison identity.
+The runner owns these limits; tasks cannot raise them. Result v7 embeds the versioned policy, and it enters comparison identity.
 
 | Limit                     | Value                                                               |
 | ------------------------- | ------------------------------------------------------------------- |
@@ -251,14 +296,14 @@ These are logical snapshot/capture limits, separate from the Linux allocated-byt
 | Format         | Current schema                                                   |
 | -------------- | ---------------------------------------------------------------- |
 | Task v1        | [task-v1.schema.json](schemas/task-v1.schema.json)               |
-| Result v6      | [result-v6.schema.json](schemas/result-v6.schema.json)           |
+| Result v7      | [result-v7.schema.json](schemas/result-v7.schema.json)           |
 | Batch v1       | [batch-v1.schema.json](schemas/batch-v1.schema.json)             |
-| Batch index v1 | [batch-index-v1.schema.json](schemas/batch-index-v1.schema.json) |
-| Comparison v5  | [comparison-v5.schema.json](schemas/comparison-v5.schema.json)   |
+| Batch index v2 | [batch-index-v2.schema.json](schemas/batch-index-v2.schema.json) |
+| Comparison v6  | [comparison-v6.schema.json](schemas/comparison-v6.schema.json)   |
 
 The result embeds the redacted task, original task digest, requested and resolved commits, runtime and execution identity, attempt/configuration/repetition identity, usage, outcome, normalized commands, patch, declared artifacts, checks, score, ordered events, errors, and worktree cleanup state. Docker evidence records image/runtime/policy identities and quota verification/cleanup for both the agent and preparer. Preparation adds Git version, worker/object snapshot digests, copied byte/file counts, and any retained input path. Preparation failures leave unavailable fields `null`. Events are discriminated unions inferred from their schema.
 
-Version 6 retains the fixed `safety` policy and requires Docker's `linux-container-v3` evidence, including preparation. Comparison v5 includes both. Earlier events and scoring v2 remain unchanged. Archived [result v1](schemas/result-v1.schema.json), [v2](schemas/result-v2.schema.json), [v3](schemas/result-v3.schema.json), [v4](schemas/result-v4.schema.json), [v5](schemas/result-v5.schema.json), [comparison v1](schemas/comparison-v1.schema.json), [v2](schemas/comparison-v2.schema.json), [v3](schemas/comparison-v3.schema.json), and [v4](schemas/comparison-v4.schema.json) remain unchanged. Current comparisons reject old results instead of inferring preparation identities. There is no automatic migration. The worker contract is generated as [preparation request v1](schemas/preparation-request-v1.schema.json) and [response v1](schemas/preparation-response-v1.schema.json).
+Result v7 adds `resourceAccounting`, either `unmanaged` or the admitted pool policy, reservation, identity, and canonical result path. Comparison v6 preserves it. Batch index v2 records accounting identity and distinguishes resource admission refusal from persistence failure. The Docker `linux-container-v3` and safety policies, events, and scoring v2 remain unchanged. Archived [result v1](schemas/result-v1.schema.json), [v2](schemas/result-v2.schema.json), [v3](schemas/result-v3.schema.json), [v4](schemas/result-v4.schema.json), [v5](schemas/result-v5.schema.json), [v6](schemas/result-v6.schema.json), [comparison v1](schemas/comparison-v1.schema.json), [v2](schemas/comparison-v2.schema.json), [v3](schemas/comparison-v3.schema.json), [v4](schemas/comparison-v4.schema.json), [v5](schemas/comparison-v5.schema.json), and [batch index v1](schemas/batch-index-v1.schema.json) remain unchanged. Current comparisons reject older results/indexes rather than infer accounting identities. There is no automatic migration. The worker contract is generated as [preparation request v1](schemas/preparation-request-v1.schema.json) and [response v1](schemas/preparation-response-v1.schema.json).
 
 Patches and text artifacts record both persisted and original SHA-256 digests. If redaction changes content, the `redacted` field is true, the regular `sha256` covers the embedded content, and `originalSha256` identifies the pre-redaction bytes. Binary artifacts are preserved byte for byte and are not text-scanned.
 
@@ -287,7 +332,7 @@ For a given result, the runner records or embeds:
 - Effective execution and safety policy, including capture limits and raw checkout behavior
 - For Docker, requested/resolved image and runtime identity
 
-The shared comparison digest covers the resolved source path, full commit, execution policy and requested image, fixed preparer image/policy, safety policy, prompt, effective budgets (including the artifact-size default), ordered checks/environment additions, and artifacts. It excludes task labels, `$schema`, and adapter configuration; adapter and full configured-task digests are separate. Repetitions of a configuration share these input digests but have distinct attempt identities and worktrees. Changing a source path changes comparison identity, even if its commit matches. Local and Docker attempts cannot share a comparison; explicit local execution and the omitted default have the same effective identity.
+The shared comparison digest covers the resolved source path, full commit, execution policy and requested image, fixed preparer image/policy, safety policy, accounting mode and limits, prompt, effective budgets (including the artifact-size default), ordered checks/environment additions, and artifacts. It excludes generated pool/reservation IDs and pool paths, task labels, `$schema`, and adapter configuration; adapter and full configured-task digests are separate. Repetitions of a configuration share these input digests but have distinct attempt identities and worktrees. Changing a source path changes comparison identity, even if its commit matches. Local and Docker attempts cannot share a comparison; explicit local execution and the omitted default have the same effective identity.
 
 The fixed example writes and checks produce the same patch/artifact content, outcomes, and scores under the same effective runtime inputs. Arbitrary fake-agent commands can still be nondeterministic. Results are not byte-identical across executions: attempt/container IDs, temporary paths, durations, operating systems, executable versions, Git configuration, filesystem behavior, and inherited local `PATH` can differ. Docker pins image bytes and records the resolved runtime, and the preparer pins its Git toolchain, but neither pins the host kernel, engine, CPU, or resource contention. Local execution does not pin tool binaries. Given unchanged saved index/result bytes and the same report generator version, regenerated JSON and Markdown reports are byte-identical.
 
@@ -314,7 +359,7 @@ Real agents should wait for the remaining milestone 3 work. The current Docker b
 - A credential broker and tested redaction policy for structured and binary evidence
 - Token and cost budgets enforced outside provider processes
 - Protection of bounded host snapshot copying against concurrent filesystem changes
-- Cross-platform containment and host/global storage accounting outside agent processes
+- Cross-platform containment and hard host/global filesystem quotas beyond cooperative pool accounting
 - Reviewed adapter toolchains and image provenance, not just digest pinning
 
 Resumable execution and a small versioned evaluation suite also remain open. The fake adapter needs no secrets or network access; a real adapter would add both. That needs a separate design and explicit authorization.

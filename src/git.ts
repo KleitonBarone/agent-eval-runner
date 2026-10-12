@@ -210,6 +210,7 @@ export async function prepareCheckout(
   sourcePath: string,
   requestedRevision: string,
   deadline = new SafetyDeadline(),
+  temporaryDirectory = tmpdir(),
 ): Promise<PreparedCheckout> {
   if (!/^[0-9a-fA-F]{40}$/u.test(requestedRevision))
     throw new Error("Expected an exact 40-character Git revision");
@@ -259,7 +260,9 @@ export async function prepareCheckout(
     .trim();
   if (/[\r\n\0]/u.test(objects) || !isAbsolute(objects))
     throw new Error("Unsupported source object directory path");
-  const rootPath = await mkdtemp(join(tmpdir(), "agent-eval-worktree-"));
+  const rootPath = await mkdtemp(
+    join(temporaryDirectory, "agent-eval-worktree-"),
+  );
   const gitPath = join(rootPath, "git");
   const path = join(rootPath, "checkout");
   const checkout = { sourcePath: source, rootPath, gitPath, path, revision };
@@ -307,7 +310,7 @@ export async function prepareCheckout(
     return checkout;
   } catch (error) {
     // No agent has started. Remove only this freshly created private checkout.
-    await removeCheckout(checkout);
+    await removeCheckout(checkout, temporaryDirectory);
     throw error;
   }
 }
@@ -439,8 +442,9 @@ export async function capturePatch(
 
 export async function assertCheckoutRoot(
   checkout: PreparedCheckout,
+  temporaryDirectory = tmpdir(),
 ): Promise<void> {
-  const temporaryRoot = await realpath(tmpdir());
+  const temporaryRoot = await realpath(temporaryDirectory);
   const root = await realpath(checkout.rootPath);
   const relation = relative(temporaryRoot, root);
   if (
@@ -459,7 +463,8 @@ export async function assertCheckoutRoot(
 
 export async function removeCheckout(
   checkout: PreparedCheckout,
+  temporaryDirectory = tmpdir(),
 ): Promise<void> {
-  await assertCheckoutRoot(checkout);
+  await assertCheckoutRoot(checkout, temporaryDirectory);
   await rm(checkout.rootPath, { recursive: true, force: true });
 }

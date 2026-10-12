@@ -31,9 +31,12 @@ async function directory(path: string): Promise<boolean> {
 export async function createSnapshotCheckout(
   sourcePath: string,
   revision: string,
+  temporaryDirectory = tmpdir(),
 ): Promise<PreparedCheckout> {
   const source = await realpath(resolve(sourcePath));
-  const rootPath = await mkdtemp(join(tmpdir(), "agent-eval-worktree-"));
+  const rootPath = await mkdtemp(
+    join(temporaryDirectory, "agent-eval-worktree-"),
+  );
   const path = join(rootPath, "checkout");
   const gitPath = join(rootPath, "git");
   await mkdir(path);

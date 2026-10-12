@@ -2,6 +2,39 @@ import { expect, it } from "vitest";
 
 import { runProcess } from "../src/process.js";
 import { createRedactor } from "../src/redaction.js";
+import { sha256 } from "../src/identity.js";
+
+it("bounds managed output after redaction without splitting UTF-8 and preserves captured digests", async () => {
+  const result = await runProcess(
+    {
+      command: process.execPath,
+      args: [
+        "-e",
+        "process.stdout.write('abcd'); process.stderr.write('界界')",
+      ],
+      cwd: process.cwd(),
+      timeoutMs: 2000,
+      timeoutTermination: "check_timeout",
+      maxOutputBytes: 6,
+      maxPersistedOutputBytes: 4,
+    },
+    createRedactor(["abcd"]),
+  );
+  expect(Buffer.byteLength(result.stdout)).toBeLessThanOrEqual(4);
+  expect(Buffer.byteLength(result.stderr)).toBeLessThanOrEqual(4);
+  expect(result.exitCode).toBe(0);
+  expect(result.termination).toBeNull();
+  expect(result.stdoutTruncated).toBe(true);
+  expect(result.stderrTruncated).toBe(true);
+  expect(result.stdout).toBe("[RED");
+  expect(result.stderr).toBe("界");
+  expect(result.outputDigests).toEqual({
+    stdoutCapturedSha256: sha256("abcd"),
+    stderrCapturedSha256: sha256("界界"),
+    stdoutPersistedSha256: sha256("[RED"),
+    stderrPersistedSha256: sha256("界"),
+  });
+});
 
 it("terminates commands even when the abort signal was already raised", async () => {
   const controller = new AbortController();

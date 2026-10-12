@@ -38,6 +38,39 @@ describe("CLI arguments", () => {
       markdownPath: resolve("report.md"),
     });
   });
+  it("selects resource policy initialization, read-only inventory, and opt-in pool execution", () => {
+    expect(
+      parseArguments([
+        "resources-init",
+        "--root",
+        "pool",
+        "--policy",
+        "policy.json",
+      ]),
+    ).toEqual({
+      operation: "resources-init",
+      root: resolve("pool"),
+      policyPath: resolve("policy.json"),
+    });
+    expect(parseArguments(["inventory", "--root", "pool"])).toEqual({
+      operation: "inventory",
+      root: resolve("pool"),
+    });
+    expect(
+      parseArguments([
+        "run",
+        "--task",
+        "task.json",
+        "--output",
+        "result.json",
+        "--resource-root",
+        "pool",
+      ]),
+    ).toMatchObject({ resourceRoot: resolve("pool") });
+    expect(() =>
+      parseArguments(["inventory", "--root", "pool", "--delete"]),
+    ).toThrow("Unknown argument");
+  });
   it.each([
     ["run", "--task", "--output", "result.json"],
     ["run", "--task", "task.json", "--output"],

@@ -29,11 +29,13 @@ import { writeAtomic, writeJsonAtomic } from "./persistence.js";
 import { parseResultSpec, type ResultSpec } from "./result.js";
 import { scoreChecks } from "./scoring.js";
 import { totalMetric, type UsageMetric } from "./usage.js";
+import { resourceIdentity, type ResourceIdentity } from "./resources-spec.js";
 
 function verifyResult(
   result: ResultSpec,
   entry: Extract<BatchEntry, { state: "finished" }>,
   comparisonSha256: string,
+  resources: ResourceIdentity,
 ): void {
   const configuredExecution = executionIdentity(result.task.execution);
   if (
@@ -45,6 +47,13 @@ function verifyResult(
     throw new Error(`Execution identity does not match task for ${entry.id}`);
   if (result.comparisonSha256 !== comparisonSha256)
     throw new Error(`Incompatible task inputs for ${entry.id}`);
+  if (
+    canonicalJson(resourceIdentity(result.resourceAccounting)) !==
+    canonicalJson(resources)
+  )
+    throw new Error(
+      `Resource accounting policy does not match the index for ${entry.id}`,
+    );
   if (
     result.attempt.id !== entry.id ||
     result.attempt.configurationId !== entry.configurationId ||
@@ -113,7 +122,7 @@ export function createComparison(
     const result = results.get(entry.id);
     if (result === undefined) throw new Error(`Missing result for ${entry.id}`);
     parseResultSpec(result);
-    verifyResult(result, entry, index.comparisonSha256);
+    verifyResult(result, entry, index.comparisonSha256, index.resourceIdentity);
     return {
       state: "finished",
       id: entry.id,
@@ -128,6 +137,7 @@ export function createComparison(
       source: result.source,
       execution: result.execution,
       safety: result.safety,
+      resourceAccounting: result.resourceAccounting,
       status: result.status,
       outcome: result.attempt.outcome,
       score: result.score,
@@ -182,7 +192,7 @@ export function createComparison(
       `Batch state is ${index.state}; some attempts may be unfinished.`,
     );
   const report: ComparisonSpec = {
-    schemaVersion: "5",
+    schemaVersion: "6",
     batchId: index.id,
     comparisonSha256: index.comparisonSha256,
     scoringVersion: "2",

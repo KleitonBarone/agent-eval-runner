@@ -6,6 +6,7 @@ import { ExecutionEvidenceSchema } from "./execution-spec.js";
 import { TaskSpecSchema } from "./spec.js";
 import { UsageSchema } from "./usage.js";
 import { SafetyPolicySchema } from "./safety.js";
+import { ResourceAccountingSchema } from "./resources-spec.js";
 
 const NullableString = Type.Union([Type.String(), Type.Null()]);
 const Termination = Type.Union([
@@ -27,6 +28,17 @@ export const CommandResultSchema = Type.Object(
     stderr: Type.String(),
     stdoutTruncated: Type.Boolean(),
     stderrTruncated: Type.Boolean(),
+    outputDigests: Type.Optional(
+      Type.Object(
+        {
+          stdoutCapturedSha256: Type.String({ pattern: "^[0-9a-f]{64}$" }),
+          stderrCapturedSha256: Type.String({ pattern: "^[0-9a-f]{64}$" }),
+          stdoutPersistedSha256: Type.String({ pattern: "^[0-9a-f]{64}$" }),
+          stderrPersistedSha256: Type.String({ pattern: "^[0-9a-f]{64}$" }),
+        },
+        { additionalProperties: false },
+      ),
+    ),
     durationMs: Type.Number({ minimum: 0 }),
     termination: Termination,
     error: NullableString,
@@ -72,7 +84,8 @@ export const CheckResultSchema = Type.Union([
 export const ResultSpecSchema = Type.Object(
   {
     $schema: Type.Optional(Type.String()),
-    schemaVersion: Type.Literal("6"),
+    schemaVersion: Type.Literal("7"),
+    resourceAccounting: ResourceAccountingSchema,
     safety: SafetyPolicySchema,
     execution: ExecutionEvidenceSchema,
     runner: Type.Object(
@@ -176,7 +189,7 @@ export const ResultSpecSchema = Type.Object(
     ),
   },
   {
-    $id: "https://agent-eval-runner.dev/schemas/result-v6.schema.json",
+    $id: "https://agent-eval-runner.dev/schemas/result-v7.schema.json",
     additionalProperties: false,
   },
 );
@@ -199,10 +212,10 @@ export function parseResultSpec(input: unknown): ResultSpec {
     typeof input === "object" &&
     input !== null &&
     "schemaVersion" in input &&
-    input.schemaVersion !== "6"
+    input.schemaVersion !== "7"
   ) {
     throw new Error(
-      "Unsupported result version. Comparisons require result version 6.",
+      "Unsupported result version. Comparisons require result version 7.",
     );
   }
   assertResultSpec(input);

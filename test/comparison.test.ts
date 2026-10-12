@@ -15,6 +15,10 @@ import { canonicalJson, sha256 } from "../src/identity.js";
 import { initialExecutionEvidence } from "../src/execution-spec.js";
 import { jsonDocument } from "../src/persistence.js";
 import { parseResultSpec, type ResultSpec } from "../src/result.js";
+import {
+  RESOURCE_POLICY,
+  RESOURCE_RESERVATION,
+} from "../src/resources-spec.js";
 import { batchFor } from "./helpers/batch.js";
 import {
   cleanupTestRepositories,
@@ -109,20 +113,34 @@ describe("saved-result comparisons", () => {
         }),
       }),
     ).toThrow("Execution identity");
+    const incompatibleResources = {
+      ...index,
+      resourceIdentity: {
+        kind: "managed",
+        policyVersion: RESOURCE_POLICY.version,
+        limits: { ...RESOURCE_RESERVATION, records: 100 },
+      },
+    } satisfies BatchIndex;
+    expect(() =>
+      createComparison(incompatibleResources, new Map([[entry.id, result]])),
+    ).toThrow("Resource accounting policy does not match");
     expect(() => parseResultSpec({ ...result, schemaVersion: "1" })).toThrow(
-      "require result version 6",
+      "require result version 7",
     );
     expect(() => parseResultSpec({ ...result, schemaVersion: "2" })).toThrow(
-      "require result version 6",
+      "require result version 7",
     );
     expect(() => parseResultSpec({ ...result, schemaVersion: "3" })).toThrow(
-      "require result version 6",
+      "require result version 7",
     );
     expect(() => parseResultSpec({ ...result, schemaVersion: "4" })).toThrow(
-      "require result version 6",
+      "require result version 7",
     );
     expect(() => parseResultSpec({ ...result, schemaVersion: "5" })).toThrow(
-      "require result version 6",
+      "require result version 7",
+    );
+    expect(() => parseResultSpec({ ...result, schemaVersion: "6" })).toThrow(
+      "require result version 7",
     );
     expect(() =>
       parseResultSpec({

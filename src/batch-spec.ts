@@ -2,6 +2,7 @@ import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
 import { parseTaskSpec, TaskSpecSchema } from "./spec.js";
+import { ResourceIdentitySchema } from "./resources-spec.js";
 
 export const DigestSchema = Type.String({ pattern: "^[0-9a-f]{64}$" });
 const Identifier = TaskSpecSchema.properties.id;
@@ -75,7 +76,9 @@ export const BatchEntrySchema = Type.Union([
       reason: Type.Union([
         Type.Literal("cancelled"),
         Type.Literal("persistence_error"),
+        Type.Literal("resource_admission"),
       ]),
+      error: Type.Optional(Type.String({ maxLength: 4096 })),
     },
     { additionalProperties: false },
   ),
@@ -92,7 +95,8 @@ export const BatchEntrySchema = Type.Union([
 
 export const BatchIndexSchema = Type.Object(
   {
-    schemaVersion: Type.Literal("1"),
+    schemaVersion: Type.Literal("2"),
+    resourceIdentity: ResourceIdentitySchema,
     id: Identifier,
     batchSha256: DigestSchema,
     comparisonSha256: DigestSchema,
@@ -105,7 +109,7 @@ export const BatchIndexSchema = Type.Object(
     attempts: Type.Array(BatchEntrySchema, { minItems: 1 }),
   },
   {
-    $id: "https://agent-eval-runner.dev/schemas/batch-index-v1.schema.json",
+    $id: "https://agent-eval-runner.dev/schemas/batch-index-v2.schema.json",
     additionalProperties: false,
   },
 );
@@ -145,7 +149,7 @@ export function parseBatchSpec(input: unknown): BatchSpec {
 
 export function parseBatchIndex(input: unknown): BatchIndex {
   if (!Value.Check(BatchIndexSchema, input))
-    throw new Error("Invalid batch index, expected version 1");
+    throw new Error("Invalid batch index, expected version 2");
   const ids = new Set(input.attempts.map(({ id }) => id));
   if (ids.size !== input.attempts.length)
     throw new Error("Batch attempt IDs must be unique");

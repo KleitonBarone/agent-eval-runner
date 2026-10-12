@@ -10,10 +10,17 @@ import { canonicalJson, comparisonDigest, sha256 } from "./identity.js";
 import { writeJsonAtomic } from "./persistence.js";
 import { collectTaskSecrets, createRedactor } from "./redaction.js";
 import { runEvaluation } from "./runner.js";
+import {
+  assertExternalOutput,
+  readResourceIdentity,
+  ResourceAdmissionError,
+} from "./resources.js";
+import type { ResourceIdentity } from "./resources-spec.js";
 
 export interface BatchOptions {
   readonly outputDirectory: string;
   readonly signal?: AbortSignal;
+  readonly resourceRoot?: string;
 }
 
 // Index order is configuration order, then repetition order. No retries or concurrency.
@@ -22,6 +29,12 @@ export async function runBatch(
   options: BatchOptions,
 ): Promise<BatchIndex> {
   const batch = parseBatchSpec(batchInput);
+  const resourceIdentity: ResourceIdentity =
+    options.resourceRoot === undefined
+      ? { kind: "unmanaged" }
+      : await readResourceIdentity(options.resourceRoot);
+  if (options.resourceRoot !== undefined)
+    await assertExternalOutput(options.resourceRoot, options.outputDirectory);
   await mkdir(dirname(resolve(options.outputDirectory)), { recursive: true });
   // Non-recursive creation is the exclusive claim on this batch's evidence directory.
   await mkdir(options.outputDirectory);
@@ -31,10 +44,11 @@ export async function runBatch(
     ),
   );
   const index: BatchIndex = {
-    schemaVersion: "1",
+    schemaVersion: "2",
+    resourceIdentity,
     id: batch.id,
     batchSha256: sha256(canonicalJson(batch)),
-    comparisonSha256: comparisonDigest(batch.task),
+    comparisonSha256: comparisonDigest(batch.task, resourceIdentity),
     state: "active",
     attempts: batch.configurations.flatMap(
       (configuration, configurationIndex) =>
@@ -50,14 +64,14 @@ export async function runBatch(
   };
   const indexPath = join(options.outputDirectory, "batch-index.json");
   await writeJsonAtomic(indexPath, index);
-  let failure = false;
+  let failure: "persistence_error" | "resource_admission" | undefined;
   for (const [position, entry] of index.attempts.entries()) {
-    if (options.signal?.aborted === true || failure) {
+    if (options.signal?.aborted === true || failure !== undefined) {
       index.attempts[position] = {
         ...entry,
         state: "not_started",
         resultFile: null,
-        reason: failure ? "persistence_error" : "cancelled",
+        reason: failure ?? "cancelled",
       };
       continue;
     }
@@ -78,6 +92,9 @@ export async function runBatch(
           configurationId: entry.configurationId,
           repetition: entry.repetition,
           ...(options.signal === undefined ? {} : { signal: options.signal }),
+          ...(options.resourceRoot === undefined
+            ? {}
+            : { resourceRoot: options.resourceRoot }),
         },
       );
       const contents = await readFile(
@@ -90,21 +107,37 @@ export async function runBatch(
         resultSha256: sha256(contents),
       };
     } catch (error) {
-      failure = true;
-      index.attempts[position] = {
-        ...entry,
-        state: "persistence_failed",
-        resultFile: null,
-        error: redact(error instanceof Error ? error.message : String(error)),
-      };
+      if (error instanceof ResourceAdmissionError) {
+        const reason =
+          error.decision.reason === "cancelled"
+            ? "cancelled"
+            : "resource_admission";
+        if (reason !== "cancelled") failure = reason;
+        index.attempts[position] = {
+          ...entry,
+          state: "not_started",
+          resultFile: null,
+          reason,
+          error: redact(error.message).slice(0, 4096),
+        };
+      } else {
+        failure = "persistence_error";
+        index.attempts[position] = {
+          ...entry,
+          state: "persistence_failed",
+          resultFile: null,
+          error: redact(error instanceof Error ? error.message : String(error)),
+        };
+      }
     }
     await writeJsonAtomic(indexPath, index);
   }
-  index.state = failure
-    ? "failed"
-    : options.signal?.aborted === true
-      ? "cancelled"
-      : "completed";
+  index.state =
+    failure !== undefined
+      ? "failed"
+      : options.signal?.aborted === true
+        ? "cancelled"
+        : "completed";
   await writeJsonAtomic(indexPath, index);
   return index;
 }

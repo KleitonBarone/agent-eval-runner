@@ -240,8 +240,12 @@ export function containerCreateArguments(
   ];
 }
 
-async function assertDisposable(path: string, prefix: string): Promise<void> {
-  const root = await realpath(tmpdir());
+async function assertDisposable(
+  path: string,
+  prefix: string,
+  temporaryDirectory = tmpdir(),
+): Promise<void> {
+  const root = await realpath(temporaryDirectory);
   const target = await realpath(path);
   const relation = relative(root, target);
   if (
@@ -256,9 +260,9 @@ async function assertDisposable(path: string, prefix: string): Promise<void> {
 export class DockerExecution implements ExecutionBackend {
   #root: string | undefined;
   #workspace: string | undefined;
-  readonly #name = `agent-eval-${randomUUID()}`;
-  readonly #volume = `${this.#name}-workspace`;
-  readonly #holder = `${this.#name}-holder`;
+  readonly #name: string;
+  readonly #volume: string;
+  readonly #holder: string;
   #created = false;
   #volumeCreated = false;
   #holderCreated = false;
@@ -280,7 +284,14 @@ export class DockerExecution implements ExecutionBackend {
     readonly evidence: DockerRuntime,
     readonly redact: Redactor,
     readonly role: DockerRole = { kind: "agent" },
-  ) {}
+    readonly storage?: { temporaryDirectory: string; containerName: string },
+  ) {
+    this.#name = storage?.containerName ?? `agent-eval-${randomUUID()}`;
+    if (!/^agent-eval-[a-zA-Z0-9-]+$/u.test(this.#name))
+      throw new Error("Invalid owned Docker container name");
+    this.#volume = `${this.#name}-workspace`;
+    this.#holder = `${this.#name}-holder`;
+  }
 
   async #docker(
     args: readonly string[],
@@ -304,6 +315,9 @@ export class DockerExecution implements ExecutionBackend {
         timeoutTermination: "check_timeout",
         maxOutputBytes: 256 * 1024,
         ...request,
+        ...(this.storage === undefined
+          ? {}
+          : { maxPersistedOutputBytes: request?.maxOutputBytes ?? 256 * 1024 }),
       },
       redact,
     );
@@ -345,7 +359,12 @@ export class DockerExecution implements ExecutionBackend {
       throw new Error("Container execution requires a non-root Linux user");
     this.evidence.uid = uid;
     this.evidence.gid = gid;
-    this.#root = await mkdtemp(join(tmpdir(), "agent-eval-isolated-"));
+    this.#root = await mkdtemp(
+      join(
+        this.storage?.temporaryDirectory ?? tmpdir(),
+        "agent-eval-isolated-",
+      ),
+    );
     await mkdir(join(this.#root, "docker-config"));
     this.#workspace = join(this.#root, "workspace");
     this.evidence.workspacePath = this.#workspace;
@@ -874,7 +893,7 @@ export class DockerExecution implements ExecutionBackend {
       );
     const files = await scanWorkspace(this.#workspace, deadline);
     this.#exportComplete = true;
-    await assertCheckoutRoot(this.checkout);
+    await assertCheckoutRoot(this.checkout, this.storage?.temporaryDirectory);
     for (const entry of await readdir(this.checkout.path)) {
       if (entry !== ".git")
         await rm(join(this.checkout.path, entry), {
@@ -939,7 +958,11 @@ export class DockerExecution implements ExecutionBackend {
       this.evidence.storage.cleanup === "retained"
     )
       throw new Error("Retaining workspace because container cleanup failed");
-    await assertDisposable(this.#root, "agent-eval-isolated-");
+    await assertDisposable(
+      this.#root,
+      "agent-eval-isolated-",
+      this.storage?.temporaryDirectory,
+    );
     await rm(this.#root, { recursive: true, force: true });
     this.evidence.workspacePath = null;
   }

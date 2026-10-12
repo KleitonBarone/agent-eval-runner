@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import type { TaskSpec } from "./spec.js";
 import { executionIdentity } from "./execution-spec.js";
 import { SAFETY_POLICY } from "./safety.js";
+import type { ResourceIdentity } from "./resources-spec.js";
 
 export const DEFAULT_MAX_ARTIFACT_BYTES = 1024 * 1024;
 
@@ -30,7 +31,10 @@ export function canonicalJson(value: unknown): string {
   throw new Error("Cannot hash a non-JSON value");
 }
 
-export function comparisonDigest(task: Omit<TaskSpec, "adapter">): string {
+export function comparisonDigest(
+  task: Omit<TaskSpec, "adapter">,
+  resources: ResourceIdentity = { kind: "unmanaged" },
+): string {
   return sha256(
     canonicalJson({
       repository: {
@@ -47,6 +51,7 @@ export function comparisonDigest(task: Omit<TaskSpec, "adapter">): string {
       artifacts: task.artifacts,
       execution: executionIdentity(task.execution),
       safety: SAFETY_POLICY,
+      resources,
     }),
   );
 }

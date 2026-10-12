@@ -36,6 +36,13 @@ import { parseTaskSpec, type TaskSpec } from "./spec.js";
 import { fakeUsage } from "./usage.js";
 import { SAFETY_POLICY, SafetyDeadline } from "./safety.js";
 import { GitPreparation } from "./git-preparation.js";
+import {
+  assertExternalOutput,
+  reserveResources,
+  ResourceAdmissionError,
+  type ResourceLease,
+} from "./resources.js";
+import { resourceIdentity } from "./resources-spec.js";
 
 export interface RunEvaluationOptions {
   readonly outputPath?: string;
@@ -44,6 +51,7 @@ export interface RunEvaluationOptions {
   readonly attemptId?: string;
   readonly configurationId?: string;
   readonly repetition?: number;
+  readonly resourceRoot?: string;
 }
 
 function sanitizeEnvironment(
@@ -124,6 +132,48 @@ export async function runEvaluation(
   options: RunEvaluationOptions = {},
 ): Promise<ResultSpec> {
   const task = parseTaskSpec(taskInput);
+  const attemptId = options.attemptId ?? randomUUID();
+  if (options.resourceRoot === undefined)
+    return runAttempt(task, { ...options, attemptId });
+  if (options.outputPath !== undefined)
+    await assertExternalOutput(options.resourceRoot, options.outputPath);
+  const lease = await reserveResources(
+    options.resourceRoot,
+    task,
+    attemptId,
+    options.signal,
+  );
+  try {
+    const result = await runAttempt(task, { ...options, attemptId }, lease);
+    await lease.finalize(result);
+    return result;
+  } catch (error) {
+    const redact = createRedactor(collectTaskSecrets(task));
+    try {
+      await lease.preserveFailure(
+        redact(error instanceof Error ? error.message : String(error)),
+      );
+    } catch (preservationError) {
+      throw new AggregateError(
+        [error, preservationError],
+        "Attempt/inventory persistence failed; original reservation and available evidence are retained",
+      );
+    }
+    // Admission is already committed. A later lock failure cannot mean "not started".
+    if (error instanceof ResourceAdmissionError)
+      throw new Error(
+        `Resource persistence failed after admission: ${redact(error.message)}`,
+        { cause: error },
+      );
+    throw error;
+  }
+}
+
+async function runAttempt(
+  task: TaskSpec,
+  options: RunEvaluationOptions,
+  lease?: ResourceLease,
+): Promise<ResultSpec> {
   const recorder = new EventRecorder();
   recorder.record({ type: "run.started" });
   const redact = createRedactor(collectTaskSecrets(task));
@@ -142,7 +192,7 @@ export async function runEvaluation(
   const execution = initialExecutionEvidence(task.execution);
   const gitPreparation =
     execution.kind === "docker"
-      ? new GitPreparation(execution.preparation, redact)
+      ? new GitPreparation(execution.preparation, redact, lease?.storage)
       : undefined;
   let attemptOutcome: ResultSpec["attempt"]["outcome"] = "runner_error";
   let attemptDurationMs = 0;
@@ -163,6 +213,7 @@ export async function runEvaluation(
               task.repository.path,
               task.repository.revision,
               preparationDeadline,
+              lease?.storage.temporaryDirectory,
             )
           : await gitPreparation.prepare(
               task.repository.path,
@@ -187,6 +238,7 @@ export async function runEvaluation(
       checkout,
       execution,
       redact,
+      lease?.storage,
     );
     try {
       await backend.prepare(preparationDeadline);
@@ -452,20 +504,26 @@ export async function runEvaluation(
       : "failed";
   const workspaceCheckout = checkout ?? gitPreparation?.checkout;
   const result: ResultSpec = {
-    $schema: "https://agent-eval-runner.dev/schemas/result-v6.schema.json",
-    schemaVersion: "6",
+    $schema: "https://agent-eval-runner.dev/schemas/result-v7.schema.json",
+    schemaVersion: "7",
+    resourceAccounting: lease?.accounting ?? { kind: "unmanaged" },
     safety: { ...SAFETY_POLICY },
     execution,
     runner: {
       name: "agent-eval-runner",
-      version: "0.6.0",
+      version: "0.7.0",
       node: process.version,
       platform: process.platform,
       arch: process.arch,
     },
     task: sanitizeTask(task, redact),
     taskSha256: sha256(canonicalJson(task)),
-    comparisonSha256: comparisonDigest(task),
+    comparisonSha256: comparisonDigest(
+      task,
+      lease === undefined
+        ? { kind: "unmanaged" }
+        : resourceIdentity(lease.accounting),
+    ),
     adapterSha256: sha256(canonicalJson(task.adapter)),
     usage: fakeUsage(),
     status: initialStatus,
@@ -507,8 +565,12 @@ export async function runEvaluation(
   assertResultSpec(result);
   // Preserve evidence before deleting the only remaining checkout. If writing fails,
   // leave that checkout available for recovery and propagate the persistence error.
-  if (options.outputPath !== undefined)
-    await writeJsonAtomic(options.outputPath, result);
+  const persist = async (): Promise<void> => {
+    await lease?.persist(result);
+    if (options.outputPath !== undefined)
+      await writeJsonAtomic(options.outputPath, result);
+  };
+  await persist();
   if (
     checkout !== undefined &&
     options.keepWorktree !== true &&
@@ -517,7 +579,7 @@ export async function runEvaluation(
     try {
       await backend?.removeWorkspace();
       await gitPreparation?.removeWorkspace();
-      await removeCheckout(checkout);
+      await removeCheckout(checkout, lease?.storage.temporaryDirectory);
       if (execution.kind === "docker") execution.preparation.inputPath = null;
       result.workspace = { retained: false, path: null };
     } catch (error) {
@@ -527,7 +589,6 @@ export async function runEvaluation(
   }
   recorder.record({ type: "run.finished", status: result.status });
   assertResultSpec(result);
-  if (options.outputPath !== undefined)
-    await writeJsonAtomic(options.outputPath, result);
+  await persist();
   return result;
 }

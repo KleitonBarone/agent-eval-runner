@@ -20,3 +20,14 @@ export {
 export type { ExecutionConfig, ExecutionEvidence } from "./execution-spec.js";
 export { SafetyPolicySchema } from "./safety.js";
 export type { SafetyPolicy } from "./safety.js";
+export {
+  createResourcePool,
+  readResourceInventory,
+  ResourceAdmissionError,
+} from "./resources.js";
+export { parseResourcePolicy } from "./resources-spec.js";
+export type {
+  ResourcePolicyInput,
+  ResourceInventory,
+  ResourceAccounting,
+} from "./resources-spec.js";

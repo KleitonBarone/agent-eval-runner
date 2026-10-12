@@ -12,6 +12,7 @@ import {
 } from "./process.js";
 import type { Redactor } from "./redaction.js";
 import type { SafetyDeadline } from "./safety.js";
+import type { AttemptStorage } from "./resources-spec.js";
 
 export interface ExecutionBackend {
   readonly workspace: string;
@@ -34,10 +35,23 @@ export function createExecutionBackend(
   checkout: PreparedCheckout,
   evidence: ExecutionEvidence,
   redact: Redactor,
+  storage?: AttemptStorage,
 ): ExecutionBackend {
   if (config?.kind === "docker") {
     if (evidence.kind !== "docker") throw new Error("Missing Docker evidence");
-    return new DockerExecution(checkout, config.image, evidence, redact);
+    return new DockerExecution(
+      checkout,
+      config.image,
+      evidence,
+      redact,
+      { kind: "agent" },
+      storage === undefined
+        ? undefined
+        : {
+            temporaryDirectory: storage.temporaryDirectory,
+            containerName: storage.agentName,
+          },
+    );
   }
   return {
     workspace: checkout.path,

@@ -42,6 +42,7 @@ Failed and interrupted result preservation shipped in milestone 1. Version 0.2.0
 - [x] Isolate checkout configuration and bound workspace/evidence capture
 - [x] Enforce live Linux workspace and temporary byte/inode limits
 - [x] Contain Docker revision resolution, Git object parsing, and patch generation
+- [x] Add opt-in resource-pool admission budgets and a read-only inventory
 - [ ] Add the first real coding-agent adapter
 - [ ] Add credential redaction and an explicit secret boundary
 - [ ] Enforce network and filesystem policies
@@ -59,6 +60,10 @@ The third slice ships in version 0.5.0. The `linux-container-v2` policy replaces
 At version 0.5.0, Docker preparation still trusted host Git parsing. Local execution, host preparation/evidence storage, and aggregate retained resources were not quota-enforced. Tmpfs allocation limits do not bound sparse logical lengths or guarantee survival across unmount/reboot; capture limits still apply. Cooperative filesystem deadlines do not preempt stalled kernel calls. Git preparation containment follows in version 0.6.0; the other security gates remain open.
 
 Version 0.6.0 contains Docker Git operations in a separate fixed offline/non-root preparer. The controller copies only bounded opaque loose/packed objects, rejects external alternates and unsupported layouts, and never calls host Git for Docker evaluations. Source config/hooks/refs remain outside both containers. A bundled worker uses preparation request/response v1; validated file transfers preserve raw bytes and binary patches. Result v6 and comparison v5 record preparation image, Git/Node/Engine identity, worker/snapshot digests, fixed resource policy, and cleanup. Earlier schemas and scoring v2 are unchanged. Linux acceptance blocks host Git while preparing a packed fixture and replaying its binary patch, and preserves rejected/malformed source attempts. Local execution still uses host Git. Host copying remains non-atomic, host/aggregate storage remains unquotaed, and kernel/image trust, adversarial review, credential/provider boundaries, budgets, resume, and a versioned suite remain open.
+
+Version 0.7.0 adds shared, opt-in Docker resource pools. Policy, ledger, inventory, and admission decisions are v1. Persisted reservations record planned names before creation and reserve bounded host evidence plus Docker capacities. Exclusive locking prevents cooperating callers from oversubscribing; stale locks and unfinished attempts are never reclaimed automatically. Canonical results precede checkout deletion, failed/uncertain evidence remains charged, and successful cleanup retains measured logical evidence charges. The read-only CLI refuses adoption or cleanup of unrelated resources. Result v7/comparison v6 and batch index v2 record accounting identity and distinguish admission refusal from persistence failure; archived schemas and scoring v2 are unchanged. Tests cover exhaustion, real cross-process admission, restart/cancellation, ownership/aliases, result preservation, and post-redaction output growth. Linux acceptance verifies managed execution, cleanup/retention, and unchanged evidence after refusal.
+
+These are cooperative per-pool budgets, not host/global kernel quotas or physical free-space reservations. Caller mirrors, other pools, image storage, unrelated processes, and host mutation remain outside accounting. Hard host filesystem quotas, snapshot-race protection, security review, credential/egress boundaries, provider budgets, resume, and a versioned suite remain open. No real adapter or paid-model execution was added.
 
 ## Later, if justified
 

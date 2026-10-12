@@ -4,7 +4,7 @@
 
 Agent Eval Runner measures coding-agent attempts under reproducible conditions. Its output is evidence: inputs, environment identity, commands, patches, checks, resource use, and artifacts.
 
-Read `README.md` and `ROADMAP.md` before changing scope. Milestones 0, 1, and 2 are implemented. Milestone 3 has restricted Linux containers, contained Git preparation, bounded raw-byte capture, and live Linux workspace quotas for trusted fake-agent fixtures; the milestone itself is not complete. Do not describe later items as complete unless their checkbox and implementation agree.
+Read `README.md` and `ROADMAP.md` before changing scope. Milestones 0, 1, and 2 are implemented. Milestone 3 has restricted Linux containers, contained Git preparation, bounded capture, live Linux workspace quotas, and opt-in cooperative resource admission for trusted fake-agent fixtures; the milestone itself is not complete. Do not describe later items as complete unless their checkbox and implementation agree.
 
 ## Product rules
 
@@ -18,7 +18,7 @@ Read `README.md` and `ROADMAP.md` before changing scope. Milestones 0, 1, and 2 
 
 ## Runtime and isolation
 
-Use Node.js 22 or newer, pnpm, and strict TypeScript. TypeBox schemas define runtime validation, TypeScript types, and generated JSON Schemas. Do not hand-edit files under `schemas`; change the schema sources (`src/spec.ts`, `src/execution-spec.ts`, `src/preparation-protocol.ts`, `src/safety.ts`, `src/result.ts`, `src/events.ts`, `src/usage.ts`, `src/batch-spec.ts`, `src/comparison-spec.ts`), then run `pnpm schemas:write`. Result v6 and comparison v5 are current; preparation request/response v1 define the internal worker protocol. Archived result v1/v2/v3/v4/v5 and comparison v1/v2/v3/v4 must not be regenerated from current sources.
+Use Node.js 22 or newer, pnpm, and strict TypeScript. TypeBox schemas define runtime validation, TypeScript types, and generated JSON Schemas. Do not hand-edit files under `schemas`; change the schema sources (`src/spec.ts`, `src/execution-spec.ts`, `src/preparation-protocol.ts`, `src/resources-spec.ts`, `src/safety.ts`, `src/result.ts`, `src/events.ts`, `src/usage.ts`, `src/batch-spec.ts`, `src/comparison-spec.ts`), then run `pnpm schemas:write`. Result v7, comparison v6, and batch index v2 are current. Preparation and resource contracts are v1. Archived result v1-v6, comparison v1-v5, and batch index v1 must not be regenerated from current sources.
 
 The local execution boundary is a detached Git worktree in a runner-owned temporary repository. It does not restrict agent/check network or host filesystem access. Local runs still use host Git. Docker runs must use the fixed preparer for all Git operations, including revision resolution and patch generation. Do not run paid models, untrusted repositories, or untrusted commands without explicit user authorization and stronger isolation.
 
@@ -31,6 +31,10 @@ For Docker changes, read `docs/isolation.md`. Keep the policy fixed and opt-in. 
 `src/storage.ts` owns fixed tmpfs options, mounted-quota verification, and bounded export validation. Do not restore a writable host bind mount, use ordinary unquotaed volumes, unpack daemon tar exports, or restart a lost storage holder. The read-only holder runs only fixed runner helpers, never task commands. Incomplete export retains the holder/volume and records their identities; removing the last mount destroys tmpfs data. Verify ownership before cleanup, and never remove retained resources automatically.
 
 `src/object-snapshot.ts` copies only bounded opaque loose/pack object files without calling Git. Reject external alternates, linked-worktree metadata, links, and unsupported layouts. Do not copy source config/hooks/refs or mount the source object store directly. `src/git-preparation.ts` passes only the copied read-only snapshot and bundled worker to the preparer; the agent never receives either. Validate protocol, paths, bytes, and digests before accepting files. Stop the preparer after each operation and retain its private quota volume on incomplete capture. Failed preparation retains copied inputs, never falls back to host Git, and never starts an adapter.
+
+`src/resources.ts` owns opt-in Docker admission. Persist reservations and planned names before creating resources; keep canonical bounded results inside the owned pool before deleting checkouts. Caller mirrors must stay outside it, including through aliases. Use the lease's explicit temporary parent for checkout/export cleanup, not a broad directory. Ledger/result validation must refuse altered identities, undercharging, links, and changed finalized bytes.
+
+Inventory is read-only and registered-only. Never adopt legacy/unrelated resources, break stale locks, reclaim exited PIDs, or remove retained evidence automatically. Unfinished and uncertain attempts keep conservative charges. Account for redaction growth before persistence, preserve bounded captured-stream digests, and mark additional truncation. Admission accounting is per pool, not a hard host filesystem quota, physical free-space reservation, or fresh Docker ownership attestation.
 
 ## Keep adapters thin
 
@@ -47,6 +51,7 @@ Use discriminated unions for run events. Do not use `any`, unsafe assertions, or
 - Comparisons read saved results only. Reject incompatible task/scoring identities, altered bytes, escaping result paths, and attempts to overwrite evidence.
 - Keep known-zero fake model usage distinct from unknown usage. Unknown usage propagates to totals; no provider token/cost budget exists yet.
 - Shared-task digests include execution policy, requested image, and safety policy, but exclude adapter configuration; preserve separate configured-task and adapter digests. Changing checkout/capture semantics requires a policy/version decision. Do not claim matching hashes pin the host toolchain or authenticate evidence. Compare stable execution runtimes, not generated container IDs.
+- Include resource accounting mode/limits in comparison identity; exclude generated pool/reservation IDs and pool paths. Resource refusal starts no adapter and uses `not_started/resource_admission` in batch index v2, not `persistence_failed`. Stop new scheduling without losing earlier finalized results.
 
 ## Verification
 
@@ -67,6 +72,8 @@ pnpm example:batch
 On a non-root Linux runner with a trusted Docker Engine and both preinstalled images documented in README, also run `pnpm example:isolated` after building the CLI. Linux CI runs it; Windows tests verify unsupported execution does not fall back to the host. Native Windows cannot validate live Linux containment. Do not claim it passed without actually running the Linux acceptance path.
 
 Add focused tests for budget enforcement, adapter normalization, event ordering, redaction, process termination, artifact capture, and scoring changes. Git/workspace/storage tests also cover filter/hook/config rejection, raw binary patch replay, unsupported entries, bounded reads/traversal, aggregate artifacts, quota-policy rejection, and oversized patch/export retention. Linux acceptance must reach actual `ENOSPC` for workspace and temporary bytes/inodes, verify evidence/check continuation, and verify successful resource cleanup. Test cleanup must resolve and remove only private directories associated with its trusted source fixture. Do not add placeholder scripts that always pass.
+
+Resource tests cover each admission dimension, real cross-process locking, stale owners/locks, cancellation, canonical persistence failure, ownership/path aliases, changed evidence, and policy compatibility. Linux acceptance must exercise the built resource CLI, managed cancellation, successful cleanup, retained capture, read-only inventory, and refusal without evidence changes. Never simulate those live assertions with mocks; focused filesystem/state tests may mock unavailable execution preparation.
 
 ## Documentation boundaries
 

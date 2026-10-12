@@ -20,6 +20,7 @@ import {
 import type { Redactor } from "./redaction.js";
 import { SAFETY_POLICY, type SafetyDeadline } from "./safety.js";
 import { readBoundedFile } from "./workspace.js";
+import type { AttemptStorage } from "./resources-spec.js";
 
 export class GitPreparation {
   checkout: PreparedCheckout | undefined;
@@ -27,6 +28,7 @@ export class GitPreparation {
   constructor(
     readonly evidence: PreparationEvidence,
     readonly redact: Redactor,
+    readonly storage?: AttemptStorage,
   ) {}
 
   async prepare(
@@ -40,7 +42,11 @@ export class GitPreparation {
       );
     if (process.getuid?.() === 0)
       throw new Error("Docker preparation requires a non-root Linux runner");
-    this.checkout = await createSnapshotCheckout(source, revision);
+    this.checkout = await createSnapshotCheckout(
+      source,
+      revision,
+      this.storage?.temporaryDirectory,
+    );
     const checkout = this.checkout;
     const input = join(checkout.rootPath, "preparation-input");
     this.evidence.inputPath = input;
@@ -78,6 +84,12 @@ export class GitPreparation {
       this.evidence,
       this.redact,
       { kind: "git_preparer", input },
+      this.storage === undefined
+        ? undefined
+        : {
+            temporaryDirectory: this.storage.temporaryDirectory,
+            containerName: this.storage.preparationName,
+          },
     );
     await this.#sandbox.prepare(deadline);
     const response = await this.#operation(

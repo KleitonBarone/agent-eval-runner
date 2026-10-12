@@ -14,6 +14,7 @@ import { createServer } from "node:net";
 import { networkInterfaces, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
+import { Value } from "@sinclair/typebox/value";
 
 import { readComparison, writeComparison } from "../src/comparison.js";
 import { runBatch } from "../src/batch.js";
@@ -25,6 +26,16 @@ import { PREPARATION_IMAGE } from "../src/execution-spec.js";
 import { prepareCheckout, removeCheckout } from "../src/git.js";
 import { runEvaluation } from "../src/runner.js";
 import type { TaskSpec } from "../src/spec.js";
+import {
+  resourceReservation,
+  readResourceInventory,
+} from "../src/resources.js";
+import {
+  AdmissionDecisionSchema,
+  ResourceInventorySchema,
+  RESOURCE_POLICY,
+  parseResourceLedger,
+} from "../src/resources-spec.js";
 import {
   cleanupTestRepositories,
   createTestRepository,
@@ -75,6 +86,7 @@ async function savedAttempt(
     signal?: AbortSignal;
     cli?: boolean;
     preparationFailed?: boolean;
+    resourceRoot?: string;
   } = {},
 ) {
   const path = join(output, `${label}.json`);
@@ -89,6 +101,9 @@ async function savedAttempt(
       taskPath,
       "--output",
       path,
+      ...(options.resourceRoot === undefined
+        ? []
+        : ["--resource-root", options.resourceRoot]),
     ]);
     const summary: unknown = JSON.parse(stdout);
     assert.deepEqual(summary, {
@@ -102,6 +117,9 @@ async function savedAttempt(
     result = await runEvaluation(task, {
       outputPath: path,
       ...(options.signal === undefined ? {} : { signal: options.signal }),
+      ...(options.resourceRoot === undefined
+        ? {}
+        : { resourceRoot: options.resourceRoot }),
     });
   }
   const raw: unknown = JSON.parse(await readFile(path, "utf8"));
@@ -209,6 +227,30 @@ try {
     },
   } satisfies TaskSpec;
   const taskCredential = "isolation-test-only-credential";
+  const resourceRoot = join(output, "resource-pool");
+  const resourcePolicyPath = join(output, "resource-policy.json");
+  const reserved = resourceReservation();
+  await writeJsonAtomic(resourcePolicyPath, {
+    schemaVersion: "1",
+    limits: {
+      poolBytes: RESOURCE_POLICY.metadataBytes + 3 * reserved.poolBytes,
+      poolEntries: RESOURCE_POLICY.metadataEntries + 3 * reserved.poolEntries,
+      dockerVolumeBytes: 2 * reserved.dockerVolumeBytes,
+      dockerContainers: 2 * reserved.dockerContainers,
+      dockerVolumes: 2 * reserved.dockerVolumes,
+      records: 4,
+    },
+  });
+  const initialized = await execFileAsync(process.execPath, [
+    "dist/cli.js",
+    "resources-init",
+    "--root",
+    resourceRoot,
+    "--policy",
+    resourcePolicyPath,
+  ]);
+  const initializedInventory: unknown = JSON.parse(initialized.stdout);
+  assert.ok(Value.Check(ResourceInventorySchema, initializedInventory));
   const probe = [
     "const fs=require('node:fs'); const assert=require('node:assert/strict');",
     "assert.notEqual(process.getuid(),0); assert.equal(process.cwd(),'/workspace');",
@@ -402,29 +444,45 @@ try {
   const preparing = savedAttempt(base, "preparation-cancelled", {
     signal: preparationController.signal,
     preparationFailed: true,
+    resourceRoot,
   });
   let watchingPreparation = false;
   const preparationPoll = setInterval(() => {
     if (watchingPreparation) return;
     watchingPreparation = true;
     void (async () => {
-      for (const entry of await readdir(fixtureRoot)) {
-        if (!entry.startsWith("agent-eval-worktree-")) continue;
-        const root = join(fixtureRoot, entry);
-        const marker: unknown = JSON.parse(
-          await readFile(join(root, "source.json"), "utf8").catch(() => "null"),
+      const raw: unknown = JSON.parse(
+        await readFile(join(resourceRoot, "inventory.json"), "utf8"),
+      );
+      const ledger = parseResourceLedger(raw);
+      for (const record of ledger.records) {
+        if (record.state !== "active") continue;
+        const temporary = join(
+          resourceRoot,
+          "attempts",
+          record.id,
+          "temporary",
         );
-        if (
-          typeof marker === "object" &&
-          marker !== null &&
-          "sourcePath" in marker &&
-          marker.sourcePath === repository.path &&
-          (await access(join(root, "object-snapshot.json")).then(
-            () => true,
-            () => false,
-          ))
-        )
-          preparationController.abort();
+        for (const entry of await readdir(temporary)) {
+          if (!entry.startsWith("agent-eval-worktree-")) continue;
+          const root = join(temporary, entry);
+          const marker: unknown = JSON.parse(
+            await readFile(join(root, "source.json"), "utf8").catch(
+              () => "null",
+            ),
+          );
+          if (
+            typeof marker === "object" &&
+            marker !== null &&
+            "sourcePath" in marker &&
+            marker.sourcePath === repository.path &&
+            (await access(join(root, "object-snapshot.json")).then(
+              () => true,
+              () => false,
+            ))
+          )
+            preparationController.abort();
+        }
       }
     })()
       .catch(() => {
@@ -816,6 +874,113 @@ try {
   }
 
   const batchDirectory = join(output, "batch");
+  const managed = await savedAttempt(base, "managed-success", {
+    cli: true,
+    resourceRoot,
+  });
+  assert.equal(managed.status, "succeeded");
+  assert.equal(managed.resourceAccounting.kind, "managed");
+  const managedAccounting = managed.resourceAccounting;
+  const managedRecord = (
+    await readResourceInventory(resourceRoot)
+  ).ledger.records.find(({ id }) => id === managedAccounting.reservationId);
+  assert.equal(managedRecord?.state, "completed");
+  assert.equal(managedRecord.charged.dockerContainers, 0);
+  assert.equal(managedRecord.charged.dockerVolumes, 0);
+  for (const owned of managedRecord.docker)
+    for (const name of [
+      owned.containerName,
+      owned.holderName,
+      owned.volumeName,
+    ]) {
+      const exists = await execFileAsync("docker", [
+        "--host",
+        "unix:///var/run/docker.sock",
+        "inspect",
+        name,
+      ]).then(
+        () => true,
+        () => false,
+      );
+      assert.equal(
+        exists,
+        false,
+        "Managed successful resource was not removed",
+      );
+    }
+  const managedRetained = await savedAttempt(
+    {
+      ...base,
+      adapter: {
+        kind: "fake",
+        actions: [
+          ...base.adapter.actions,
+          {
+            kind: "runCommand",
+            command: "node",
+            args: ["-e", "require('node:fs').symlinkSync('/tmp','escape')"],
+          },
+        ],
+      },
+    },
+    "managed-retained",
+    { resourceRoot },
+  );
+  assert.equal(managedRetained.status, "failed");
+  assert.equal(managedRetained.patch.captured, false);
+  assert.equal(managedRetained.workspace.retained, true);
+  assert.equal(managedRetained.resourceAccounting.kind, "managed");
+  const canonical = managedRetained.resourceAccounting.resultPath;
+  const canonicalBefore = await readFile(canonical);
+  const inventoryBefore = await readFile(join(resourceRoot, "inventory.json"));
+  const inventoryCommand = await execFileAsync(process.execPath, [
+    "dist/cli.js",
+    "inventory",
+    "--root",
+    resourceRoot,
+  ]);
+  const inventory: unknown = JSON.parse(inventoryCommand.stdout);
+  assert.ok(Value.Check(ResourceInventorySchema, inventory));
+  assert.equal(inventory.ledger.records.length, 3);
+  assert.equal(
+    inventory.ledger.records.filter(({ state }) => state === "retained").length,
+    2,
+  );
+  assert.equal(inventory.lockPresent, false);
+  assert.deepEqual(inventory.warnings, []);
+  const rejectedTaskPath = join(output, "resource-rejected-task.json");
+  await writeJsonAtomic(rejectedTaskPath, base);
+  let decision: unknown;
+  try {
+    await execFileAsync(process.execPath, [
+      "dist/cli.js",
+      "run",
+      "--task",
+      rejectedTaskPath,
+      "--output",
+      join(output, "resource-rejected-result.json"),
+      "--resource-root",
+      resourceRoot,
+    ]);
+    throw new Error("Resource-exhausted attempt unexpectedly started");
+  } catch (error) {
+    if (
+      !(error instanceof Error) ||
+      !("stdout" in error) ||
+      typeof error.stdout !== "string"
+    )
+      throw error;
+    decision = JSON.parse(error.stdout);
+  }
+  assert.ok(Value.Check(AdmissionDecisionSchema, decision));
+  assert.equal(decision.reason, "capacity");
+  assert.deepEqual(await readFile(canonical), canonicalBefore);
+  assert.deepEqual(
+    await readFile(join(resourceRoot, "inventory.json")),
+    inventoryBefore,
+  );
+  await assert.rejects(access(join(output, "resource-rejected-result.json")));
+  assert.equal(connections, 0);
   const { adapter, ...shared } = base;
   await runBatch(
     {

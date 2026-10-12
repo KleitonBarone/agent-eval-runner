@@ -10,15 +10,25 @@ import {
   PreparationRequestSchema,
   PreparationResponseSchema,
 } from "../src/preparation-protocol.js";
+import {
+  AdmissionDecisionSchema,
+  ResourceInventorySchema,
+  ResourceLedgerSchema,
+  ResourcePolicyInputSchema,
+} from "../src/resources-spec.js";
 
 const schemas = [
   ["schemas/task-v1.schema.json", TaskSpecSchema],
-  ["schemas/result-v6.schema.json", ResultSpecSchema],
+  ["schemas/result-v7.schema.json", ResultSpecSchema],
   ["schemas/batch-v1.schema.json", BatchSpecSchema],
-  ["schemas/batch-index-v1.schema.json", BatchIndexSchema],
-  ["schemas/comparison-v5.schema.json", ComparisonSpecSchema],
+  ["schemas/batch-index-v2.schema.json", BatchIndexSchema],
+  ["schemas/comparison-v6.schema.json", ComparisonSpecSchema],
   ["schemas/preparation-request-v1.schema.json", PreparationRequestSchema],
   ["schemas/preparation-response-v1.schema.json", PreparationResponseSchema],
+  ["schemas/resource-policy-v1.schema.json", ResourcePolicyInputSchema],
+  ["schemas/resource-ledger-v1.schema.json", ResourceLedgerSchema],
+  ["schemas/resource-inventory-v1.schema.json", ResourceInventorySchema],
+  ["schemas/resource-admission-v1.schema.json", AdmissionDecisionSchema],
 ] as const;
 const mode = process.argv[2];
 if (mode !== "--check" && mode !== "--write") {

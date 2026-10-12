@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
 
 import type { Redactor } from "./redaction.js";
+import { sha256 } from "./identity.js";
+import type { CommandResult } from "./result.js";
 
 export type ProcessTermination = "wall_clock" | "check_timeout" | "cancelled";
 
@@ -12,6 +14,7 @@ export interface ProcessRequest {
   readonly timeoutMs: number;
   readonly timeoutTermination: Exclude<ProcessTermination, "cancelled">;
   readonly maxOutputBytes: number;
+  readonly maxPersistedOutputBytes?: number;
   readonly signal?: AbortSignal;
   readonly input?: string;
 }
@@ -29,6 +32,7 @@ export interface ProcessResult {
   readonly durationMs: number;
   readonly termination: ProcessTermination | null;
   readonly error: string | null;
+  readonly outputDigests?: NonNullable<CommandResult["outputDigests"]>;
 }
 
 function childEnvironment(
@@ -85,6 +89,12 @@ export async function runProcess(
   request: ProcessRequest,
   redact: Redactor,
 ): Promise<ProcessResult> {
+  if (
+    request.maxPersistedOutputBytes !== undefined &&
+    (!Number.isSafeInteger(request.maxPersistedOutputBytes) ||
+      request.maxPersistedOutputBytes < 0)
+  )
+    throw new Error("Invalid persisted output byte limit");
   const startedAt = performance.now();
   const stdout: Buffer[] = [];
   const stderr: Buffer[] = [];
@@ -164,16 +174,46 @@ export async function runProcess(
   clearTimeout(timer);
   request.signal?.removeEventListener("abort", abort);
 
+  const stdoutCaptured = Buffer.concat(stdout, stdoutBytes);
+  const stderrCaptured = Buffer.concat(stderr, stderrBytes);
+  const stdoutRedacted = redact(stdoutCaptured.toString("utf8"));
+  const stderrRedacted = redact(stderrCaptured.toString("utf8"));
+  const limit = request.maxPersistedOutputBytes;
+  const trim = (value: string) => {
+    const bytes = Buffer.from(value);
+    if (limit === undefined || bytes.length <= limit)
+      return { value, truncated: false };
+    let end = limit;
+    // Buffer slicing alone can add a replacement character beyond the byte budget.
+    while (end > 0 && ((bytes[end] ?? 0) & 0xc0) === 0x80) end -= 1;
+    return { value: bytes.subarray(0, end).toString("utf8"), truncated: true };
+  };
+  const sanitizedStdout = trim(stdoutRedacted);
+  const sanitizedStderr = trim(stderrRedacted);
+  const stdoutPersisted = sanitizedStdout.value;
+  const stderrPersisted = sanitizedStderr.value;
+  if (sanitizedStdout.truncated) stdoutTruncated = true;
+  if (sanitizedStderr.truncated) stderrTruncated = true;
   return {
     command: redact(request.command),
     args: request.args.map(redact),
     cwd: request.cwd,
     exitCode: closed.code,
     signal: closed.signal,
-    stdout: redact(Buffer.concat(stdout, stdoutBytes).toString("utf8")),
-    stderr: redact(Buffer.concat(stderr, stderrBytes).toString("utf8")),
+    stdout: stdoutPersisted,
+    stderr: stderrPersisted,
     stdoutTruncated,
     stderrTruncated,
+    ...(limit === undefined
+      ? {}
+      : {
+          outputDigests: {
+            stdoutCapturedSha256: sha256(stdoutCaptured),
+            stderrCapturedSha256: sha256(stderrCaptured),
+            stdoutPersistedSha256: sha256(stdoutPersisted),
+            stderrPersistedSha256: sha256(stderrPersisted),
+          },
+        }),
     durationMs: Math.round((performance.now() - startedAt) * 1_000) / 1_000,
     termination,
     error: spawnError,

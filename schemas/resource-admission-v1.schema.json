@@ -1,0 +1,21 @@
+{
+  "$id": "https://agent-eval-runner.dev/schemas/resource-admission-v1.schema.json",
+  "additionalProperties": false,
+  "type": "object",
+  "required": ["schemaVersion", "kind", "reason", "message"],
+  "properties": {
+    "schemaVersion": { "const": "1", "type": "string" },
+    "kind": { "const": "resource_admission_denied", "type": "string" },
+    "reason": {
+      "anyOf": [
+        { "const": "capacity", "type": "string" },
+        { "const": "unresolved_inventory", "type": "string" },
+        { "const": "busy", "type": "string" },
+        { "const": "cancelled", "type": "string" },
+        { "const": "unsupported", "type": "string" },
+        { "const": "inventory_error", "type": "string" }
+      ]
+    },
+    "message": { "maxLength": 4096, "type": "string" }
+  }
+}
