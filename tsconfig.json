@@ -14,7 +14,7 @@
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,
-    "types": ["node", "vitest/globals"]
+    "types": ["node"]
   },
-  "include": ["src", "scripts", "test", "vitest.config.ts", "eslint.config.js"]
+  "include": ["src"]
 }

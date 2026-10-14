@@ -1,4 +1,2 @@
 dist
-coverage
-.agent-eval
 pnpm-lock.yaml
